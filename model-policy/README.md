@@ -57,8 +57,10 @@
 
 ### 3-1. ディレクトリをコピーして実行権限を付与
 ```bash
-cp -R skills/model-policy ~/.claude/skills/
+# この model-policy ディレクトリを ~/.claude/skills/ 配下へコピー
+cp -R model-policy ~/.claude/skills/
 chmod +x ~/.claude/skills/model-policy/scripts/*.sh
+# 配布リポジトリからは ./install.sh model-policy でも導入できる（コピー・chmod・パス置換を自動実行）。
 ```
 
 ### 3-2. ランタイム状態を初期化（Stage 0 の安全状態）
