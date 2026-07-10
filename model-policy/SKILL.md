@@ -1,19 +1,19 @@
 ---
 name: model-policy
-description: サブエージェントのモデル使用ポリシー（fable禁止・opus強制）の確認・一時緩和・復帰・無効化を行うスキル。メインループ専任の fable がサブエージェント（Agent ツール / Workflow の agent()）に割り当てられる/継承される事故を PreToolUse hook でハーネスレベルに防ぎ、作業は opus サブエージェントへ委譲させてコストを抑える。ユーザーが「モデルポリシー」「ポリシー確認」「モデル強制の状態」「（サブエージェントの）緩和して」「fableサブエージェントを許可」「fork を使いたい」「ポリシー戻して」「enforce に戻して」「モデル強制を無効化」「キルスイッチ」等と言ったら、明示的に /model-policy と打たれていなくても使う。全プロジェクトから使える（ユーザーレベル hook のため既存・新規リポジトリに自動適用）。
+description: サブエージェントのモデル使用ポリシー（fable禁止・opus 既定/sonnet 併用）の確認・一時緩和・復帰・無効化を行うスキル。メインループ専任の fable がサブエージェント（Agent ツール / Workflow の agent()）に割り当てられる/継承される事故を PreToolUse hook でハーネスレベルに防ぎ、作業を opus/sonnet に振り分けて委譲してコストを抑える。ユーザーが「モデルポリシー」「ポリシー確認」「モデル強制の状態」「（サブエージェントの）緩和して」「fableサブエージェントを許可」「fork を使いたい」「ポリシー戻して」「enforce に戻して」「モデル強制を無効化」「キルスイッチ」等と言ったら、明示的に /model-policy と打たれていなくても使う。全プロジェクトから使える（ユーザーレベル hook のため既存・新規リポジトリに自動適用）。
 ---
 
 # model-policy — サブエージェント・モデル使用ポリシーの運用
 
 ## これは何か（仕組みの要約）
 
-メインループを Fable 5（高単価・統括専任）で回しつつ、**サブエージェントが誤って fable で起動すること**をハーネスレベルで防ぐ 4 層システム。ハード強制は「fable 禁止・fork 禁止・model 未指定→opus 書き換え」の 3 点に絞り、opus/sonnet/haiku など fable 以外は素通しする。「全部 opus」というコスト方針そのものは行動規範層（CLAUDE.md）で担保する。
+メインループを Fable 5（高単価・統括専任）で回しつつ、**サブエージェントが誤って fable で起動すること**をハーネスレベルで防ぐ 4 層システム。ハード強制は「fable 禁止・fork 禁止・model 未指定→opus 書き換え」の 3 点に絞り、opus/sonnet/haiku など fable 以外は素通しする。作業を opus/sonnet に振り分けて委譲する使い分け方針そのものは行動規範層（CLAUDE.md）で担保する。
 
 | 層 | 実体 | 何をするか | 強制 or 規範 |
 |---|---|---|---|
 | 1 | `model_policy_agent_hook.sh`（PreToolUse "Agent\|Task"） | fork→deny / fable→deny / 未指定・inherit→opus に書き換え / allowed は素通し | **強制** |
 | 1b | `model_policy_workflow_hook.sh`（PreToolUse "Workflow"） | script に `agent(` があり `model` 語ゼロ→deny / `fable` 名指し→deny | **強制** |
-| 2 | `~/.claude/CLAUDE.md` 追記 | fable=統括専任・作業は opus サブエージェントへ委譲・agent() は model 明示・fork 禁止 | 規範（compact 後も残る） |
+| 2 | `~/.claude/CLAUDE.md` 追記 | fable=統括専任・作業を opus/sonnet に振り分けて委譲・agent() は model 明示・fork 禁止 | 規範（compact 後も残る） |
 | 3 | `model_policy.sh`（このスキル） | status / relax / reset / off / enforce の運用 CLI | 運用 |
 | 4 | `model_policy_reminder_hook.sh`（UserPromptSubmit） | 緩和中のときだけ「残り時間・戻し方」を注入（enforce 時は無出力=トークンゼロ） | 可視化 |
 

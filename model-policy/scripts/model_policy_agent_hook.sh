@@ -9,7 +9,7 @@
 #     (b) model に fable を含む指定を deny（on_fable=rewrite なら opus へ書き換え）
 #     (c) model 未指定 / inherit を updatedInput で default_model（opus）へ書き換え
 #   opus/sonnet/haiku など fable 以外は素通し（安価モデルの明示指定を壊さないため）。
-#   「全部 opus」というコスト方針は CLAUDE.md の行動規範層（層2）で担保し、hook では
+#   opus 既定・sonnet 併用方針は CLAUDE.md の行動規範層（層2）で担保し、hook では
 #   fable 排除に必要な最小限だけをハード強制する。
 #
 # 設計上の厳守事項（この環境の慣習）:
@@ -129,7 +129,7 @@ SUBTYPE="$(printf '%s' "$INPUT" | jq -r '.tool_input | (.subagent_type // "")' 2
 
 # --- 4. fork かつ deny_fork → deny --------------------------------------------
 if [ "$SUBTYPE" = "fork" ] && [ "$DENY_FORK" = "true" ]; then
-  emit_deny 'モデルポリシー: fork サブエージェントは親（メインループ=fable）のモデルを継承するため禁止です。subagent_type を明示した通常の Agent 呼び出しに model:"opus" を付けて実行してください。fork がどうしても必要な場合は、ユーザーに /model-policy relax の実行を依頼してください。'
+  emit_deny 'モデルポリシー: fork サブエージェントは親（メインループ=fable）のモデルを継承するため禁止です。subagent_type を明示した通常の Agent 呼び出しに model:"opus"（既定）または "sonnet"（調査等の定型作業）を付けて実行してください。fork がどうしても必要な場合は、ユーザーに /model-policy relax の実行を依頼してください。'
 fi
 
 # --- 5. MODEL に fable を含む → on_fable に従う（deny / rewrite）---------------
@@ -138,7 +138,7 @@ case "$MODEL" in
     if [ "$ON_FABLE" = "rewrite" ]; then
       emit_rewrite
     else
-      emit_deny 'モデルポリシー違反: サブエージェントへの fable 割り当ては禁止です（fable はメインループの統括専任）。model:"opus" を指定して Agent を再実行してください。一時的に fable サブエージェントが必要な場合は、ユーザーに /model-policy relax の実行を依頼してください。'
+      emit_deny 'モデルポリシー違反: サブエージェントへの fable 割り当ては禁止です（fable はメインループの統括専任）。model:"opus"（既定）または "sonnet"（定型作業）を指定して Agent を再実行してください。一時的に fable サブエージェントが必要な場合は、ユーザーに /model-policy relax の実行を依頼してください。'
     fi
     ;;
 esac

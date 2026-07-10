@@ -101,14 +101,14 @@ case "$SCRIPT" in
     # (1) fable / Fable を含む → deny
     case "$SCRIPT" in
       *fable*|*Fable*)
-        emit_deny 'モデルポリシー: Workflow script 内で fable が指定されています。サブエージェントへの fable 割り当ては禁止です。全 agent() の opts.model を "opus" に修正して再実行してください。'
+        emit_deny 'モデルポリシー: Workflow script 内で fable が指定されています。サブエージェントへの fable 割り当ては禁止です。全 agent() の opts.model を "opus"（探索段は "sonnet" 可）に修正して再実行してください。'
         ;;
     esac
     # (2) model の語が一度も無い → deny
     case "$SCRIPT" in
       *model*) : ;;  # model の語がどこかにある → 取りこぼし（部分パースはしない）。素通し。
       *)
-        emit_deny 'モデルポリシー: この Workflow script の agent() 呼び出しに model 指定がありません。Workflow のサブエージェントは既定でメインループのモデル（fable）を継承するため、全 agent() 呼び出しに opts.model:"opus" を明示して再実行してください。'
+        emit_deny 'モデルポリシー: この Workflow script の agent() 呼び出しに model 指定がありません。Workflow のサブエージェントは既定でメインループのモデル（fable）を継承するため、全 agent() 呼び出しに opts.model を明示して再実行してください（既定 "opus"、探索・finder 段は "sonnet" 可）。'
         ;;
     esac
     ;;
