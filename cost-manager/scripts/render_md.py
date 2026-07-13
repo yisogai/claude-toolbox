@@ -153,22 +153,18 @@ def _demo_report_and_meta():
     now_jst = lib.to_jst(datetime.now(timezone.utc))
     start_jst = now_jst - timedelta(hours=1, minutes=30)
     meta = {
-        # 60字級の長いタスク名（PNG カードの2行折り返し・末尾省略表示を確認するため意図的に長くしている）
-        "task_name": (
-            "デモタスク: fable-cost-manager レポート改修（タイトル折り返し・タスク内容表示・"
-            "Fable小計・Retina対応）の動作確認一式"
-        ),
+        # 推奨形を反映: --task 相当の短いタスク名（15字程度）。
+        "task_name": "請求システム改修",
         "date_jst": now_jst.strftime("%Y-%m-%d"),
         "start_jst": start_jst.strftime("%H:%M"),
         "end_jst": now_jst.strftime("%H:%M"),
         "duration": lib.fmt_duration((now_jst - start_jst).total_seconds()),
         "active_text": "1時間2分（経過の69%）",
         "scope": "session（デモデータ）",
-        # 120字級の長い task_desc（PNG カードの3行折り返し・末尾省略表示を確認するため意図的に長くしている）
+        # 推奨形を反映: --desc 相当の、非エンジニアにも伝わる平易な日本語で1〜2行の要約。
         "task_desc": (
-            "render_md.py --demo と render_image.py --demo の両方で同一のデモデータを用い、"
-            "タイトル2行折り返し・タスク内容3行表示・Fable小計とその他モデル小計の分離表示・"
-            "Retina(2x)スケール描画の4点をまとめて目視確認するためのサンプルレポートです。"
+            "お客様への請求書で金額の端数がずれる不具合を直しました。"
+            "あわせてキャンペーン割引の表示もわかりやすく整理しています。"
         ),
         "generated_at_jst": now_jst.strftime("%Y-%m-%d %H:%M:%S"),
         "budget_usd": 20.0,

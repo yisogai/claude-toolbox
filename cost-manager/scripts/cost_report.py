@@ -12,7 +12,7 @@
     3 = 対象範囲にコストデータが0件（--since/--until やマーカー範囲、--scope を確認）
 
 実行例:
-    python3 scripts/cost_report.py --desc "設計レビューとdocs更新"
+    python3 scripts/cost_report.py --task "設計レビュー" --desc "設計レビューとdocs更新"
     python3 scripts/cost_report.py --desc "調査タスク" --scope global
     python3 scripts/cost_report.py --desc "画像なしで確認" --no-image
     python3 scripts/cost_report.py --desc "Chrome版カードで生成" --via chrome
@@ -57,6 +57,7 @@ def main():
     parser = argparse.ArgumentParser(
         description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter
     )
+    parser.add_argument("--task", default=None, help="短いタスク名（マーカー無し時のPNGタイトルに使う。15字程度を推奨）。")
     parser.add_argument("--desc", default=None, help="タスク内容の要約（1〜2行）。Claude が渡すのが第一。")
     parser.add_argument("--scope", choices=["session", "global"], default=None)
     parser.add_argument("--since", default=None, help="ISO8601（省略時はマーカー開始時刻 or セッション全体）")
@@ -122,7 +123,7 @@ def main():
     report = lib.aggregate(rows, pricing, at=now_jst.date(), usd_jpy=usd_jpy)
 
     # タスク名・タスク内容
-    task_name = (active.get("task_name") if active else None) or args.desc or "(タスク名未設定)"
+    task_name = (active.get("task_name") if active else None) or args.task or args.desc or "(タスク名未設定)"
     task_desc = args.desc
     if not task_desc:
         # limit=120: PNG カードの task_desc 表示が3行（_wrap_lines）まで活かせるよう既定80から引き上げ

@@ -44,6 +44,9 @@ FOOTER_COLOR = (91, 96, 112)
 TITLE_FONT_SIZE = 26
 TITLE_LINE_H = 34
 TITLE_MAX_LINES = 3
+# タイトル块 -> タスク内容(desc)块の追加余白。TITLE_LINE_H 自体に行送り分の余白を含むため、
+# desc 表示時は行間だけだと詰まって見える（実レンダリングで目視確認済み）ため数px足す。
+TITLE_DESC_GAP = 6
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +63,8 @@ def _card_height(
     """カード全体の論理高さ(px)を返す（scale とは独立。実px化は _ScaledDraw.S() が担う）。
 
     n_title_lines: タイトルの折り返し行数（最大3。1行超過分は論理34px/行（TITLE_LINE_H）で加算）。
-    n_desc_lines: task_desc の折り返し行数（0=非表示。表示時は論理24px/行＋余白8pxを加算）。
+    n_desc_lines: task_desc の折り返し行数（0=非表示。表示時はタイトル块との間に
+    TITLE_DESC_GAP、行間は論理24px/行、末尾に余白8pxを加算）。
     total_block_h: 下段合計ブロックに確保する論理高さ。既定240は「Fable(payg)>0 かつ
     included>0」の最も背の高いケース基準（render_pillow 側が分岐に応じて実測値を渡す）。
     引数はキーワード既定値付きで拡張しているため、chrome 側（render_chrome /
@@ -71,7 +75,9 @@ def _card_height(
     描画される）。旧値160は32pt/42px行送り基準だったため、行送りを34pxへ縮小した差分
     （42-34=8px）だけ引き下げている。
     """
-    header_h = 152 + max(n_title_lines - 1, 0) * TITLE_LINE_H + (n_desc_lines * 24 + 8 if n_desc_lines else 0)
+    header_h = 152 + max(n_title_lines - 1, 0) * TITLE_LINE_H + (
+        TITLE_DESC_GAP + n_desc_lines * 24 + 8 if n_desc_lines else 0
+    )
     table_header_h = 34
     row_h = 30
     footer_h = 50
@@ -306,6 +312,7 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
 
     # タスク内容（あれば MUTED 16pt 最大3行。空 or task_name と同一なら省略）
     if desc_lines:
+        y += TITLE_DESC_GAP
         for line in desc_lines:
             sd.text((pad, y), line, font=f_desc, fill=MUTED)
             y += 24

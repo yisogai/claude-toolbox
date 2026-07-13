@@ -25,7 +25,8 @@ Claude Code（fable / Opus / Sonnet 等）のタスク単位コストを、trans
 ### Claude Code から使う（推奨）
 
 Claude Code のチャットで下表の発火ワードを言うだけで、スキル `cost-manager` が対応するスクリプトを
-呼び出す。`/cost-manager` と明示入力しても同様に発火する。
+呼び出す。`/cost-manager` と明示入力しても同様に発火する。コストレポート生成時は、Claude が短い
+タスク名（`--task`）と非エンジニア向けの平易な要約（`--desc`）を自動で組み立てて渡す。
 
 | 操作 | 発火ワードの例 | 対応スクリプト |
 | --- | --- | --- |
@@ -59,7 +60,7 @@ python3 scripts/cost_status.py --json   # フェーズ2 statusline 用
 #### 3. コストレポートを生成する
 
 ```sh
-python3 scripts/cost_report.py --desc "今回の作業内容を1〜2行で要約"
+python3 scripts/cost_report.py --task "短いタスク名" --desc "今回の作業内容を1〜2行で要約"
 ```
 
 - 範囲は「マーカーの `started_at` 〜 現在」。マーカーが無ければ現在セッション全体。
@@ -78,6 +79,7 @@ python3 scripts/cost_report.py --desc "今回の作業内容を1〜2行で要約
 
 | オプション | 説明 |
 | --- | --- |
+| `--task "<短いタスク名>"` | マーカー無し時に PNG カードのタイトルへ使う短いタスク名（15字程度を推奨）。マーカーがある場合はマーカーの task_name が優先される。 |
 | `--desc "<要約>"` | タスク内容の要約。Claude が渡すのが第一（省略時はマーカーの task_name、それも無ければ範囲内最初のユーザープロンプト冒頭）。 |
 | `--scope session\|global` | `global` は全プロジェクト時間窓走査（無関係セッション混入の可能性あり、レポートに注記される）。既定 `session`。 |
 | `--since` / `--until` | ISO8601 で範囲を明示指定（最優先）。 |
