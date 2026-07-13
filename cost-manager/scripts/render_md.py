@@ -80,7 +80,8 @@ def render_report_md(report: "lib.Report", meta: dict, template_path=None) -> st
 
     meta の必須キー: task_name, date_jst, start_jst, end_jst, duration, scope,
                       task_desc, generated_at_jst
-    任意キー: budget_usd, stale_after_days
+    meta の任意キー（欠落時は既定値でフォールバック）: active_text（既定 "—"）,
+                      budget_usd, stale_after_days
     """
     tmpl_path = Path(template_path) if template_path else _template_path()
     with open(tmpl_path, encoding="utf-8") as f:
@@ -92,6 +93,7 @@ def render_report_md(report: "lib.Report", meta: dict, template_path=None) -> st
         "start_jst": meta.get("start_jst", ""),
         "end_jst": meta.get("end_jst", ""),
         "duration": meta.get("duration", ""),
+        "active_text": meta.get("active_text", "—"),
         "scope": meta.get("scope", ""),
         "task_desc": meta.get("task_desc") or "(要約未指定)",
         "model_rows": build_model_rows(report),
@@ -160,6 +162,7 @@ def _demo_report_and_meta():
         "start_jst": start_jst.strftime("%H:%M"),
         "end_jst": now_jst.strftime("%H:%M"),
         "duration": lib.fmt_duration((now_jst - start_jst).total_seconds()),
+        "active_text": "1時間2分（経過の69%）",
         "scope": "session（デモデータ）",
         # 120字級の長い task_desc（PNG カードの3行折り返し・末尾省略表示を確認するため意図的に長くしている）
         "task_desc": (

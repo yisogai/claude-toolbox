@@ -1,6 +1,7 @@
 {
   "usd_jpy": 160,
   "default_scope": "session",
+  "active_gap_max_sec": 900,
   "image": {
     "renderer": "pillow",
     "width": 1000,

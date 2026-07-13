@@ -59,8 +59,11 @@ def _card_height(
     included>0」の最も背の高いケース基準（render_pillow 側が分岐に応じて実測値を渡す）。
     引数はキーワード既定値付きで拡張しているため、chrome 側（render_chrome /
     _build_card_html）の既存呼び出し（位置引数2つのみ）は無改造で動作する。
+
+    header_h の固定値 160 は「タイトル1行＋メタ情報行（経過）＋実処理時間行」の基本3行分
+    （meta["active_text"] は常に存在するため実処理時間行は常時描画される）。
     """
-    header_h = 130 + max(n_title_lines - 1, 0) * 42 + (n_desc_lines * 24 + 8 if n_desc_lines else 0)
+    header_h = 160 + max(n_title_lines - 1, 0) * 42 + (n_desc_lines * 24 + 8 if n_desc_lines else 0)
     table_header_h = 34
     row_h = 30
     footer_h = 50
@@ -282,9 +285,14 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
     meta_line = (
         f"{meta.get('date_jst', '')}（JST） "
         f"{meta.get('start_jst', '')} 〜 {meta.get('end_jst', '')}"
-        f"（実働 {meta.get('duration', '')}）"
+        f"（経過 {meta.get('duration', '')}）"
     )
     sd.text((pad, y), meta_line, font=f_meta, fill=MUTED)
+    y += 30
+
+    # 実処理時間（active_text は meta に常に存在。計算不能時は "—"）
+    active_line = f"実処理 {meta.get('active_text', '—')}"
+    sd.text((pad, y), active_line, font=f_meta, fill=MUTED)
     y += 34
     sd.line((pad, y, width - pad, y), fill=LINE, width=1)
     y += 20

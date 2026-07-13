@@ -130,6 +130,11 @@ def main():
 
     budget_usd = active.get("budget_usd") if active else None
 
+    # 実処理時間（active time）走査。コスト集計（rows/report）とは完全に独立しており、
+    # iter_usage/Accumulator/collect_dedup_rows/aggregate には一切影響しない。
+    gap_max_sec = float(config.get("active_gap_max_sec", 900))
+    scan = lib.scan_activity(tfiles, gap_max_sec)
+
     # 表示用の開始/終了時刻
     # since 明示時はそれを、無指定時は「窓内に採用した生データ行の最早 timestamp」を使う
     # （dedup 採用行=output最大 の timestamp は生データ最早行から数秒〜1分ずれるため）。
@@ -137,11 +142,30 @@ def main():
         start_display_utc = since_dt
     else:
         start_display_utc = collect_stats.get("earliest_ts") or until_dt
-    end_display_utc = until_dt
+
+    if args.until:
+        # --until 明示時は従来どおり補正しない
+        end_display_utc = until_dt
+    else:
+        # レポートターン除外済みの最終アクティビティ時刻に補正する（該当なしなら従来どおり until）
+        activity_before_until = [t for t in scan.event_times if t <= until_dt]
+        end_display_utc = max(activity_before_until) if activity_before_until else until_dt
+
+    if end_display_utc < start_display_utc:
+        end_display_utc = start_display_utc
 
     start_jst = lib.to_jst(start_display_utc)
     end_jst = lib.to_jst(end_display_utc)
     duration_sec = (end_display_utc - start_display_utc).total_seconds()
+
+    active_sec = lib.active_seconds(scan.intervals, clip_start=start_display_utc, clip_end=end_display_utc)
+    if not scan.event_times:
+        active_text = "—"
+    elif duration_sec > 0:
+        pct = min(100, round(active_sec / duration_sec * 100))
+        active_text = f"{lib.fmt_duration(active_sec)}（経過の{pct}%）"
+    else:
+        active_text = lib.fmt_duration(active_sec)
 
     meta = {
         "task_name": task_name,
@@ -149,6 +173,7 @@ def main():
         "start_jst": start_jst.strftime("%H:%M"),
         "end_jst": end_jst.strftime("%H:%M"),
         "duration": lib.fmt_duration(duration_sec),
+        "active_text": active_text,
         "scope": _describe_scope(scope_mode, sessions_for_desc),
         "task_desc": task_desc,
         "generated_at_jst": now_jst.strftime("%Y-%m-%d %H:%M:%S"),
@@ -179,6 +204,8 @@ def main():
             "scope_mode": scope_mode,
             "since": start_display_utc.isoformat().replace("+00:00", "Z"),
             "until": end_display_utc.isoformat().replace("+00:00", "Z"),
+            "duration_sec": int(duration_sec),
+            "active_sec": int(active_sec),
             "total_usd": report.total_usd,
             "total_jpy": report.total_jpy,
             "payg_usd": report.payg_usd,
@@ -203,6 +230,7 @@ def main():
         if image_warn:
             print(f"警告: {image_warn}")
     print(f"合計: ${lib.fmt_usd(report.total_usd, 2)} / ¥{lib.fmt_jpy(report.total_jpy)}")
+    print(f"実処理時間: {active_text}")
     if usd_jpy_warn:
         print(f"警告: {usd_jpy_warn}")
     dropped_no_ts = collect_stats.get("dropped_no_timestamp", 0)

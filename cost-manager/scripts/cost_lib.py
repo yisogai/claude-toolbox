@@ -24,6 +24,8 @@ Python の対話的呼び出しで行う。
     iter_usage(path, start_offset=0)                 -- (rows, new_offset) を返す行パーサ
     Accumulator                                       -- requestId/uuid dedup
     collect_dedup_rows(paths, since, until)          -- iter_usage + Accumulator の合成ヘルパ
+    scan_activity(tfiles, gap_max_sec)               -- 実処理時間（active time）用の活動走査
+    active_seconds(intervals, clip_start, clip_end)  -- interval union のクリップ済み合計秒
     load_config() / load_pricing()
     resolve_model(model, pricing) / rate_for(resolved, pricing, at)
     billing_class(agg, pricing)                      -- "payg"(Fable) | "included"(Max20x込み) 判定
@@ -427,6 +429,295 @@ def _extract_text(content) -> Optional[str]:
             if isinstance(block, dict) and block.get("type") == "text" and block.get("text"):
                 return block["text"]
     return None
+
+
+# ---------------------------------------------------------------------------
+# 実処理時間（active time）
+# ---------------------------------------------------------------------------
+# コスト集計（iter_usage / Accumulator / collect_dedup_rows / aggregate）とは完全に
+# 独立した transcript 走査。dedup ロジックには一切触れない。
+
+@dataclass
+class ActivityScan:
+    """scan_activity() の戻り値。"""
+    intervals: list       # list[tuple[datetime, datetime]] ターン/ギャップ分割済み・未マージ・未クリップ
+    event_times: list     # sorted list[datetime] 全イベント時刻（レポートターン除外後）
+    report_cutoff: object  # datetime | None（検出したレポートターンのターン開始 ts の最小値。連続ターン境界列は先頭まで遡り済み）
+
+
+_COMMAND_TAG_PREFIXES = ("<command-name>", "<local-command")
+
+
+def _starts_with_command_tag(text: str) -> bool:
+    return (text or "").lstrip().startswith(_COMMAND_TAG_PREFIXES)
+
+
+def _is_human_prompt(rec: dict) -> bool:
+    """メインファイルの1レコードが「人間の入力プロンプト」かどうかを判定する（実データ検証済みの判定式）。
+
+    スラッシュコマンド展開（<command-name>/<local-command...> で始まるテキスト）・
+    tool_result・サイドチェーン・isMeta・toolUseResult 付き行は人間プロンプトとして扱わない。
+
+    注: 「ターン開始」イベントはこの人間プロンプト判定だけでは不十分。スラッシュコマンド起動時に
+    連続して現れる <local-command-caveat> / <command-name> / <local-command-stdout> の3レコードは
+    ここでは人間プロンプト扱いされない（isMeta=True または <command-name>/<local-command プレフィックス
+    のため）が、それらもユーザー操作によるターン開始である。ターン境界の総合判定は
+    「人間プロンプト または スラッシュコマンドレコード」= `_is_turn_start()` を使うこと
+    （`_is_command_record()` がスラッシュコマンドレコード側を判定する）。
+    """
+    if rec.get("type") != "user":
+        return False
+    message = rec.get("message")
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    if rec.get("isSidechain") is True:
+        return False
+    if rec.get("isMeta") is True:
+        return False
+    if "toolUseResult" in rec:
+        return False
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return not _starts_with_command_tag(content)
+    if isinstance(content, list):
+        first_text = None
+        for block in content:
+            if not isinstance(block, dict):
+                continue
+            if block.get("type") == "tool_result":
+                return False
+            if first_text is None and block.get("type") == "text":
+                first_text = block.get("text") or ""
+        if first_text is None:
+            # text ブロックが無い（画像のみ等）場合、tool_result も無ければ人間扱いにする。
+            return True
+        return not _starts_with_command_tag(first_text)
+    return False
+
+
+def _is_command_record(rec: dict) -> bool:
+    """メインファイルの1レコードが「スラッシュコマンド起動レコード」かどうかを判定する。
+
+    `/cost-manager` 等のスラッシュコマンド起動時に type=="user"（message.role=="user"）で
+    連続出現する3種のレコードを指す:
+      1. isMeta=True, content が "<local-command-caveat>" で始まる
+      2. isMeta 無し, content が "<command-name>" で始まる
+      3. isMeta 無し, content が "<local-command-stdout>" で始まる
+    isMeta の値は問わない（1. は isMeta=True だが "<local-command-caveat>" は
+    "<local-command" プレフィックスに一致するため拾える）。tool_result（toolUseResult キーあり）・
+    サイドチェーン行は対象外。
+    """
+    if rec.get("type") != "user":
+        return False
+    message = rec.get("message")
+    if not isinstance(message, dict) or message.get("role") != "user":
+        return False
+    if rec.get("isSidechain") is True:
+        return False
+    if "toolUseResult" in rec:
+        return False
+
+    content = message.get("content")
+    if isinstance(content, str):
+        return _starts_with_command_tag(content)
+    if isinstance(content, list):
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                return _starts_with_command_tag(block.get("text") or "")
+        return False
+    return False
+
+
+def _is_turn_start(rec: dict) -> bool:
+    """レコードが「ターン開始」イベントかどうか（人間プロンプト or スラッシュコマンドレコード）。
+
+    scan_activity() のセグメント分割・レポートターン除外の基準点はいずれもこの判定を使う
+    （`_is_human_prompt` 単独では、スラッシュコマンド起動の3連レコードがターン開始として
+    認識されず、コマンド起動でレポートを生成した際に直前の実作業ごと過剰除外される
+    バグがあったため）。
+    """
+    return _is_human_prompt(rec) or _is_command_record(rec)
+
+
+def _is_report_marker(rec: dict) -> bool:
+    """assistant レコードが「cost_report.py を python で実行する Bash tool_use」を含むかどうかを判定する。
+
+    判定条件は command 文字列が "cost_report.py" と "python" の両方を含むこと。スキル経由の起動は
+    常に `python3 <abs-path>/cost_report.py ...` 形式のため検出できる。閲覧系コマンド
+    （`cat scripts/cost_report.py` や `git log cost_report.py` 等）は "python" を含まないため
+    誤検出しない。一方でシェバン直接実行（`./scripts/cost_report.py ...`）は "python" を含まない
+    ため検出対象外（既知の制約）。
+    """
+    if rec.get("type") != "assistant":
+        return False
+    message = rec.get("message")
+    if not isinstance(message, dict):
+        return False
+    content = message.get("content")
+    if not isinstance(content, list):
+        return False
+    for block in content:
+        if not isinstance(block, dict):
+            continue
+        if block.get("type") == "tool_use" and block.get("name") == "Bash":
+            command = str((block.get("input") or {}).get("command", ""))
+            if "cost_report.py" in command and "python" in command:
+                return True
+    return False
+
+
+def _scan_file_events(path) -> list:
+    """1 transcript ファイルを走査し、timestamp を持つレコードを (ts, is_turn_start, is_marker) のリストで返す。
+
+    is_turn_start は「ターン開始」イベント（人間プロンプト or スラッシュコマンドレコード。
+    `_is_turn_start()` 参照）を表す。iter_usage() と同様にファイル全体を1行ずつ JSON パースする
+    （増分オフセットは扱わない）。壊れた行（JSON decode error）・timestamp 欠落/パース不能行は skip する。
+    """
+    events = []
+    try:
+        with open(path, "r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                if not isinstance(rec, dict):
+                    continue
+                ts_raw = rec.get("timestamp")
+                if not ts_raw:
+                    continue
+                try:
+                    ts = parse_iso(ts_raw)
+                except (ValueError, TypeError):
+                    continue
+                events.append((ts, _is_turn_start(rec), _is_report_marker(rec)))
+    except OSError:
+        pass
+    return events
+
+
+def scan_activity(tfiles: Iterable, gap_max_sec: float = 900.0) -> ActivityScan:
+    """複数 transcript を走査し、活動 interval と全イベント時刻を抽出する。
+
+    tfiles は collect_dedup_rows() と同じ TFile/Path/str の混在リストを受け取る
+    （iter_transcripts() が返すものをそのまま渡せる）。コスト集計ロジック
+    （iter_usage/Accumulator/collect_dedup_rows/aggregate）には一切手を触れない。
+
+    - サブエージェントファイル（パスに "subagents" を含む）: ターン開始判定・
+      レポートマーカー判定を行わず、全レコードを活動イベント扱いにする。セグメント
+      分割はギャップ（> gap_max_sec）のみで行う。
+    - メインファイル: ターン開始イベント（人間プロンプト or スラッシュコマンドレコード。
+      `_is_turn_start()` 参照）で必ずセグメントを分割し（ギャップの大小に関係なく、
+      人間の入力待ちを実処理時間から除くため）、さらにギャップが gap_max_sec を超えても
+      分割する。また、そのファイルの最後のターン開始 ts（L）以降に cost_report.py を
+      python で実行する Bash tool_use（レポートターンマーカー）が見つかった場合、その
+      ファイルの ts >= L のイベントを全て除外する（現在進行中のレポート生成ターン自体を
+      実処理時間・最終アクティビティ判定から除くため）。スラッシュコマンド起動レコードも
+      ターン開始に含めることで、コマンド起動でレポートを生成した場合に L がコマンド
+      起動時刻まで正しく前進し、直前の実作業ターンが過剰除外されないようにしている。
+      L の直前のイベントもターン開始である間は L をそこまで遡らせる（連続するターン境界列
+      = コマンド展開の3連続レコード等は先頭まで遡ってまとめて除外する）。
+      除外が起きた L のうち最小値を report_cutoff として返す。
+    """
+    all_intervals: list = []
+    all_event_times: list = []
+    report_cutoffs: list = []
+
+    for tf in tfiles:
+        path = tf.path if isinstance(tf, TFile) else Path(tf)
+        is_subagent = "subagents" in Path(path).parts
+
+        events = _scan_file_events(path)
+        if not events:
+            continue
+
+        if is_subagent:
+            filtered = events
+        else:
+            events = sorted(events, key=lambda e: e[0])
+            turn_start_idx = [i for i, e in enumerate(events) if e[1]]
+            if turn_start_idx:
+                idx = turn_start_idx[-1]
+                cutoff = events[idx][0]
+                has_marker_after = any(is_m and ts >= cutoff for ts, _, is_m in events)
+                if has_marker_after:
+                    # 連続するターン境界列（スラッシュコマンド展開の caveat / command-name /
+                    # local-command-stdout の3連続レコード等）は run の先頭まで L を遡らせて
+                    # まとめて除外する。遡らないとコマンド起動時のレコードが event_times に残り、
+                    # end_display がコマンド入力時刻まで伸びて放置時間の除外が不完全になる。
+                    # 自然言語起動（人間プロンプト1レコード）では直前が assistant 等のため
+                    # 遡りは発生しない（挙動不変）。
+                    while idx > 0 and events[idx - 1][1]:
+                        idx -= 1
+                    cutoff = events[idx][0]
+                    filtered = [e for e in events if e[0] < cutoff]
+                    report_cutoffs.append(cutoff)
+                else:
+                    filtered = events
+            else:
+                filtered = events
+
+        if not filtered:
+            continue
+        filtered = sorted(filtered, key=lambda e: e[0])
+
+        segments = [[filtered[0]]]
+        for ev in filtered[1:]:
+            ts, is_ts, _ = ev
+            prev_ts = segments[-1][-1][0]
+            new_segment = (not is_subagent and is_ts) or (ts - prev_ts).total_seconds() > gap_max_sec
+            if new_segment:
+                segments.append([ev])
+            else:
+                segments[-1].append(ev)
+
+        for seg in segments:
+            all_intervals.append((seg[0][0], seg[-1][0]))
+        all_event_times.extend(ts for ts, _, _ in filtered)
+
+    all_event_times.sort()
+    report_cutoff = min(report_cutoffs) if report_cutoffs else None
+    return ActivityScan(intervals=all_intervals, event_times=all_event_times, report_cutoff=report_cutoff)
+
+
+def active_seconds(intervals, clip_start=None, clip_end=None) -> float:
+    """activity interval のリストをマージ（union）し、[clip_start, clip_end] でクリップした合計秒を返す。
+
+    intervals は (start, end) の tuple のリスト（重複・未ソートで良い）。start > end の
+    要素は入れ替えて正規化する。clip_start/clip_end は None なら無制限。
+    """
+    if not intervals:
+        return 0.0
+
+    norm = []
+    for s, e in intervals:
+        if e < s:
+            s, e = e, s
+        norm.append((s, e))
+    norm.sort(key=lambda t: t[0])
+
+    merged = []
+    cur_s, cur_e = norm[0]
+    for s, e in norm[1:]:
+        if s <= cur_e:
+            if e > cur_e:
+                cur_e = e
+        else:
+            merged.append((cur_s, cur_e))
+            cur_s, cur_e = s, e
+    merged.append((cur_s, cur_e))
+
+    total = 0.0
+    for s, e in merged:
+        cs = s if clip_start is None else max(s, clip_start)
+        ce = e if clip_end is None else min(e, clip_end)
+        if ce > cs:
+            total += (ce - cs).total_seconds()
+    return total
 
 
 # ---------------------------------------------------------------------------

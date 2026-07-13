@@ -55,6 +55,122 @@ dedup ロジック:
 について、pricing.json の intro 単価（input=$2, output=$10, 5m倍率1.25, read倍率0.1）で電卓計算した
 結果 `$0.0205279` と `aggregate()` の結果が浮動小数点誤差なく一致することを確認した。
 
+## 実処理時間（active time）の算出
+
+コスト集計（`iter_usage` / `Accumulator` / `collect_dedup_rows` / `aggregate`）とは完全に独立した
+transcript 走査を `cost_lib.scan_activity()` で行い、「経過（elapsed = end_display - start_display の
+壁時計時間）」のうち Claude が実際に処理していた区間の合計（実処理時間）を求める。dedup ロジックには
+一切手を入れない。
+
+### イベント収集
+
+`collect_dedup_rows` に渡すのと同一の tfiles（メイン transcript + `subagents/agent-*.jsonl` +
+`subagents/workflows/wf_*/agent-*.jsonl`）を 1 行ずつ JSON パースし、`timestamp` を持つレコードだけを
+対象にイベント列を作る（壊れた行は `iter_usage` と同様 JSONDecodeError を skip、パース不能な
+timestamp も skip）。パスに `/subagents/` を含むファイルは「サブエージェントファイル」として扱い、
+以降の人間プロンプト判定・レポートマーカー判定は行わず全レコードを活動イベントとする。
+
+### 人間プロンプト判定式（メインファイルのみ）
+
+実データで検証済みの判定式:
+
+```
+type == "user"
+and isinstance(message, dict) and message.get("role") == "user"
+and rec.get("isSidechain") is not True
+and rec.get("isMeta") is not True
+and "toolUseResult" not in rec
+and content 条件:
+    content が str の場合: lstrip() が "<command-name>" / "<local-command" で始まらない
+    content が list の場合: type=="tool_result" のブロックを含まない、かつ最初の
+        type=="text" ブロックの text.lstrip() が上記タグで始まらない
+```
+
+tool_result（`toolUseResult` キーあり）行・`<command-name>` 等のスラッシュコマンド行・`isMeta` 行は
+人間の実入力ではないため除外する（=「人間プロンプト」ではないが、下記の通り「ターン境界」には別途含める）。
+
+### ターン境界の判定（人間プロンプト or スラッシュコマンドレコード）
+
+`scan_activity()` のセグメント分割・レポートターン除外の基準点（`L`、後述）は、上記の人間プロンプト
+判定だけでなく「スラッシュコマンドレコード」も含めた `_is_turn_start()`
+（`_is_human_prompt() or _is_command_record()`）で決まる。`/cost-manager` 等のスラッシュコマンド
+起動時に連続出現する `<local-command-caveat>` / `<command-name>` / `<local-command-stdout>` の3
+レコード（type=="user", message.role=="user"、isMeta の値は問わない）は `_is_human_prompt()` だけでは
+人間プロンプト扱いされない。人間プロンプト判定のみを `L` の基準にすると、スラッシュコマンドでレポート
+を生成した際に `L` が直前の実作業ターンまで後退し、実処理時間・`event_times` からその実作業が丸ごと
+除外される過剰除外バグがあったため、`_is_command_record()` を追加してターン境界に含めた
+（`_is_human_prompt()` 自体の判定式は変更していない）。
+
+**既知の挙動（task-notification）**: バックグラウンドのサブエージェント（Workflow 等）が完了すると
+メイン transcript に `<task-notification>` で始まる type=="user" レコードが記録される。これは
+`_is_human_prompt()` の判定式上は人間プロンプトに該当し、ターン境界になる（メイン transcript 側では
+通知直前の最終イベントで区切られ、通知までの待ち時間はセグメントに含まれない）。ただしその区間の
+実処理はバックグラウンドで動いていたサブエージェント自身の transcript（`subagents/agent-*.jsonl` 等）
+に記録されており、`active_seconds()` の interval union が拾うため、実処理時間から欠落することはない。
+
+### レポートターン除外
+
+レポート生成コマンド（`cost_report.py`）自体の実行はコスト計測対象外だが、実処理時間の計測対象に
+含めてしまうと「レポートを作る操作」自体が実処理時間を水増ししてしまう。これを避けるため、assistant
+レコードで `message.content` 内のいずれかのブロックが `type=="tool_use" and name=="Bash"` かつ
+command 文字列が `"cost_report.py"` と `"python"` の両方を含むものを「レポートマーカー」として検出
+する（`_is_report_marker()`）。スキル経由の起動は常に `python3 <path>/cost_report.py ...` 形式のため
+検出できる一方、`cat scripts/cost_report.py` や `git log cost_report.py` のような閲覧系コマンドは
+`"python"` を含まないため誤検出しない。制約として、シェバン直接実行（`./scripts/cost_report.py ...`）
+は `"python"` を含まないため検出対象外（このツールの通常の起動経路ではないため許容している）。
+
+ファイルごとに最後のターン境界時刻を `L` とし、`L` 以降（`ts >= L`）にレポートマーカーが存在する
+場合（＝現在進行中のレポート生成ターン）、そのファイルの `ts >= L` のイベントを全て捨てる。ただし
+`L` の直前のイベントもターン境界である間は `L` をそこまで遡らせる（連続するターン境界レコード列 =
+コマンド展開の caveat / command-name / local-command-stdout の3連続等は run の先頭まで遡ってまとめて
+除外する。遡らないとコマンド起動時のレコードが終端計算に残り、放置時間の除外が不完全になるため）。
+捨てた `L` の最小値を `ActivityScan.report_cutoff` として保持する。これにより `scan.event_times`
+（レポートターン除外済み）の最大値がそのまま「コスト計測を除いた最終アクティビティ時刻」になり、
+`cost_report.py` はこれを `end_display` の補正に使う（`--until` 明示時は補正しない）。
+
+### interval 生成とギャップ閾値
+
+ファイルごとにイベントを ts 順にソートし、以下の規則でセグメント（interval）に分割する。
+
+- メインファイル: ターン境界イベント（人間プロンプト or スラッシュコマンドレコード）で必ず新しい
+  セグメントを開始する（直前とのギャップの大小に関係なく分割）。これにより「人間の入力待ち」がそもそも
+  同一セグメントに混ざらない。さらにセグメント内で連続イベント間のギャップが
+  `active_gap_max_sec`（既定900秒。`config/config.json`）を超えたら
+  分割する。
+- サブエージェントファイル: ギャップ > `active_gap_max_sec` でのみ分割する（人間プロンプトが存在
+  しないため）。
+- 各セグメントは `(最初のイベント ts, 最後のイベント ts)` の interval になる。イベント1個のセグメント
+  は長さ0の interval として保持する。
+
+### interval union（サブエージェント並行の扱い）
+
+`active_seconds(intervals, clip_start, clip_end)` は全ファイル分の interval をマージ（union）してから
+`[clip_start, clip_end]` でクリップし合計秒を返す。メインターンの実行中にサブエージェントが並行して
+動いている時間帯は union によって二重計上されない。サブエージェントがメインの最終イベントより後まで
+動いていた場合は、その分だけ `end_display`（＝event_times の最大値）も後ろに伸びる。
+
+### meta["active_text"] の表示規則
+
+- 計測不能（イベント0件等）: `"—"`。
+- `duration_sec > 0`: `f"{lib.fmt_duration(active_sec)}（経過の{pct}%）"`
+  （`pct = min(100, round(active_sec / duration_sec * 100))`）。
+- `duration_sec == 0`: `lib.fmt_duration(active_sec)` のみ（%表示なし）。
+
+### 不採用案: `turn_duration` システムレコード
+
+transcript には Claude Code 自身が書き込む `turn_duration` 系のシステムレコードが存在するが、
+どのイベントを「ターンの開始/終了」とみなして計上しているかの除外条件（人間の待ち時間・権限
+プロンプト待ちを含むか否か等）が非公開でブラックボックスであり、本ツールの dedup 検証と同水準の
+実データ突合ができない。そのため採用せず、上記の自前の transcript 走査（イベント列 → 人間プロンプト
+分割 → ギャップ閾値分割 → union）を実装した。
+
+### 既知の制約
+
+- `active_gap_max_sec`（既定900秒）以下の権限プロンプト待ち・その他の無操作区間は実処理時間に
+  含まれてしまう（同一セグメント内のギャップが閾値を超えない限り分割されないため）。
+- バックグラウンド実行（長時間のビルド・テスト等）中にイベントが閾値を超えて発生しない区間は、
+  実際には Claude が処理を継続していても実処理時間から除外される。
+
 ## 単価（pricing.json）出典
 
 - 出典: https://platform.claude.com/docs/en/about-claude/pricing（2026-07-13 時点）
