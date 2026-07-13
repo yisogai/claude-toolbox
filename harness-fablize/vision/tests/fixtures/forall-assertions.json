@@ -1,0 +1,9 @@
+{
+  "assertions": [
+    {"id": "text-present-marker", "type": "text_present", "text": "Deploy Complete", "min_count": 1},
+    {"id": "no-overlap-siblings", "type": "no_overlap_text_leaves", "eps": 0},
+    {"id": "no-horizontal-overflow", "type": "no_horizontal_overflow", "eps": 0},
+    {"id": "max-height-under-limit", "type": "max_page_height", "max": 600, "eps": 5},
+    {"id": "all-text-visible-ok", "type": "all_text_visible"}
+  ]
+}

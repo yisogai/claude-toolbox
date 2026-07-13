@@ -1,0 +1,76 @@
+{
+  "assertions": [
+    {
+      "id": "conn-ab-start",
+      "type": "endpoint_near",
+      "selector": "#conn-ab",
+      "end": "start",
+      "target": "#node-a",
+      "eps": 8
+    },
+    {
+      "id": "conn-ab-end",
+      "type": "endpoint_near",
+      "selector": "#conn-ab",
+      "end": "end",
+      "target": "#node-b",
+      "eps": 8
+    },
+    {
+      "id": "arrow-bc-direction",
+      "type": "arrow_direction",
+      "selector": "#arrow-bc",
+      "direction": "down"
+    },
+    {
+      "id": "arrow-bc-start",
+      "type": "endpoint_near",
+      "selector": "#arrow-bc",
+      "end": "start",
+      "target": "#node-b",
+      "eps": 8
+    },
+    {
+      "id": "arrow-bc-end",
+      "type": "endpoint_near",
+      "selector": "#arrow-bc",
+      "end": "end",
+      "target": "#node-c",
+      "eps": 8
+    },
+    {
+      "id": "label-a-contained",
+      "type": "contained_in",
+      "inner": "#label-a",
+      "outer": "#node-a",
+      "eps": 6
+    },
+    {
+      "id": "label-b-contained",
+      "type": "contained_in",
+      "inner": "#label-b",
+      "outer": "#node-b",
+      "eps": 6
+    },
+    {
+      "id": "label-c-contained",
+      "type": "contained_in",
+      "inner": "#label-c",
+      "outer": "#node-c",
+      "eps": 6
+    },
+    {
+      "id": "nodes-no-overlap",
+      "type": "no_overlap",
+      "selectors": ["#node-a", "#node-b", "#node-c"],
+      "eps": 0
+    },
+    {
+      "id": "legend-position",
+      "type": "relative_position",
+      "of": "#legend",
+      "to": "#diagram",
+      "position": "bottom-right"
+    }
+  ]
+}

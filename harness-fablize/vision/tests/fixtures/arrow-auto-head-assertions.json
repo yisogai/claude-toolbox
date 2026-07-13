@@ -1,0 +1,59 @@
+{
+  "assertions": [
+    {
+      "id": "arrow-a-auto-down",
+      "type": "arrow_direction",
+      "selector": "#arrow-a",
+      "direction": "down",
+      "head": "auto"
+    },
+    {
+      "id": "arrow-a-auto-up-wrongfail",
+      "type": "arrow_direction",
+      "selector": "#arrow-a",
+      "direction": "up",
+      "head": "auto"
+    },
+    {
+      "id": "arrow-b-auto-down",
+      "type": "arrow_direction",
+      "selector": "#arrow-b",
+      "direction": "down",
+      "head": "auto"
+    },
+    {
+      "id": "arrow-b-default-coordorder-up",
+      "type": "arrow_direction",
+      "selector": "#arrow-b",
+      "direction": "up"
+    },
+    {
+      "id": "arrow-c-fallback-down",
+      "type": "arrow_direction",
+      "selector": "#arrow-c",
+      "direction": "down",
+      "head": "auto"
+    },
+    {
+      "id": "arrow-d-auto-down",
+      "type": "arrow_direction",
+      "selector": "#arrow-d",
+      "direction": "down",
+      "head": "auto"
+    },
+    {
+      "id": "arrow-d-auto-up-wrongfail",
+      "type": "arrow_direction",
+      "selector": "#arrow-d",
+      "direction": "up",
+      "head": "auto"
+    },
+    {
+      "id": "arrow-e-auto-undetectable-fail",
+      "type": "arrow_direction",
+      "selector": "#arrow-e",
+      "direction": "down",
+      "head": "auto"
+    }
+  ]
+}

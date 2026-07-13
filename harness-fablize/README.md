@@ -56,6 +56,17 @@ harness-fablize/install.sh --apply
 撤去はキルスイッチ（`~/.claude/completion-gate/state.json` の `mode` を `"off"` に）で
 即時無効化するか、`UNINSTALL.md` の手動手順に従う。
 
+## vision: 図・HTML の検品ツール
+
+Opus が SVG/HTML の図を生成した際、レンダリング結果を見ずに完了宣言してしまう問題への
+対策。`vision/render.sh` は1コマンドでスクリーンショット（PNG）を撮り、`vision/check.sh`
+は視覚的な合否判断を幾何アサーションによる数値の合否に変換する。install.sh の配備対象
+ではなく単体で使うツールで、詳細な使い方・アサーション種別は `vision/README.md` を参照。
+
+動作要件: **macOS + Google Chrome**（既定パスから見つからない場合は `CHROME_BIN`
+環境変数で実行ファイルのパスを上書き可）。カナリアテスト（実モデル呼び出しなし）は
+`bash vision/tests/canary.sh`。
+
 ## 効果（要約）
 
 - 盲検 LLM 判定（fable vs 素の opus のペア比較）: **13-9-2** で fable 優位 →

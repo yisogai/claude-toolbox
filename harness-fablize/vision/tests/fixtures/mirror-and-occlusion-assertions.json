@@ -1,0 +1,29 @@
+{
+  "assertions": [
+    {
+      "id": "mirror-normal-pass",
+      "type": "no_mirror",
+      "selector": "#text-normal"
+    },
+    {
+      "id": "mirror-mirrored-fail",
+      "type": "no_mirror",
+      "selector": "#text-mirrored"
+    },
+    {
+      "id": "mirror-rotated180-pass",
+      "type": "no_mirror",
+      "selector": "#text-rotated180"
+    },
+    {
+      "id": "visible-node-pass",
+      "type": "visible_at_center",
+      "selector": "#node-visible"
+    },
+    {
+      "id": "visible-node-hidden-fail",
+      "type": "visible_at_center",
+      "selector": "#node-hidden"
+    }
+  ]
+}

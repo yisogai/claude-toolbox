@@ -1,0 +1,9 @@
+{
+  "assertions": [
+    {
+      "id": "html-element-unsupported-fail",
+      "type": "no_mirror",
+      "selector": "#box"
+    }
+  ]
+}

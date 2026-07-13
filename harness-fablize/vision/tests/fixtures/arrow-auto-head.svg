@@ -1,0 +1,46 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" width="500" height="480" viewBox="0 0 500 480">
+  <defs>
+    <marker id="arrowhead" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrowhead-plain" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+    <marker id="arrowhead-fixed" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6">
+      <path d="M0,0 L10,5 L0,10 z" fill="#334155"/>
+    </marker>
+  </defs>
+  <rect x="0" y="0" width="500" height="480" fill="#ffffff"/>
+
+  <!-- arrow-a: marker-end で下向き矢印。座標記述順（上→下）も視覚と一致する
+       素直な描き方。 -->
+  <line id="arrow-a" x1="100" y1="20" x2="100" y2="200" stroke="#334155" stroke-width="3" marker-end="url(#arrowhead)"/>
+
+  <!-- arrow-b: marker-start（orient="auto-start-reverse"、慣用形）で下向き
+       矢印。矢頭（tip）は x1,y1 側（下端）にあるが、座標記述順は下→上
+       （x1,y1=下端, x2,y2=上端）。デフォルト（head 省略）の座標順ベース
+       判定では上向きと誤判定される一方、head:"auto" は marker-start の
+       orient="auto-start-reverse" を検出して視覚どおり下向きと判定できる。 -->
+  <line id="arrow-b" x1="300" y1="200" x2="300" y2="20" stroke="#334155" stroke-width="3" marker-start="url(#arrowhead)"/>
+
+  <!-- arrow-c: 矢頭マーカーなしの素の線分（座標順は上→下）。head:"auto" は
+       両端に marker が無いため end（座標記述順）へフォールバックする。 -->
+  <line id="arrow-c" x1="420" y1="20" x2="420" y2="200" stroke="#334155" stroke-width="3"/>
+
+  <!-- arrow-d: marker-start だが orient="auto"（"auto-start-reverse" では
+       ない非慣用形）。座標記述順は上→下（x1,y1=上端=100,20, x2,y2=下端=
+       100,200）で、marker-end 慣用形とそっくりの書き方だが marker-start に
+       付けている。orient="auto" はパス方向をそのまま marker に適用する
+       ため、矢頭は反転せず下向き（＝座標記述順どおり、arrow-b とは逆の
+       挙動）になる。head:"auto" はこれを marker-start の orient を見て
+       検出し、実質 head:"end" 相当として下向きと正しく判定する。 -->
+  <line id="arrow-d" x1="100" y1="260" x2="100" y2="440" stroke="#334155" stroke-width="3" marker-start="url(#arrowhead-plain)"/>
+
+  <!-- arrow-e: marker-start だが orient 属性を省略（SVG既定値は固定角度の
+       "0" であり "auto"/"auto-start-reverse" のどちらでもない）。矢頭の
+       向きはパスの座標と無関係な固定角度になるため、start/end 座標だけ
+       からは視覚上の向きを判定できない。head:"auto" はこれを検出して
+       黙って推測せず assertion を fail させる。 -->
+  <line id="arrow-e" x1="300" y1="260" x2="300" y2="440" stroke="#334155" stroke-width="3" marker-start="url(#arrowhead-fixed)"/>
+</svg>

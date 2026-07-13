@@ -1,0 +1,6 @@
+{
+  "assertions": [
+    {"id": "width-matches-900", "type": "compare", "left": {"selector": "#probe", "prop": "w"}, "op": "eq", "right": 900, "eps": 2},
+    {"id": "height-probe-900", "type": "compare", "left": {"selector": "#probe", "prop": "h"}, "op": "ge", "right": 1, "eps": 0}
+  ]
+}

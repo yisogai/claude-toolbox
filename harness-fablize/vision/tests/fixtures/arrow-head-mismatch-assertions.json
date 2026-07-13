@@ -1,0 +1,25 @@
+{
+  "assertions": [
+    {
+      "id": "coord-order-is-up",
+      "type": "arrow_direction",
+      "selector": "#arrow",
+      "direction": "up"
+    },
+    {
+      "id": "visual-head-is-down",
+      "type": "arrow_direction",
+      "selector": "#arrow",
+      "direction": "down",
+      "head": "#arrow-head"
+    },
+    {
+      "id": "connects-top-and-bottom",
+      "type": "endpoints_touch",
+      "selector": "#arrow",
+      "a": "#box-top",
+      "b": "#box-bottom",
+      "eps": 0
+    }
+  ]
+}

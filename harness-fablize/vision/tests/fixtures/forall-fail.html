@@ -1,0 +1,36 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; font-family: sans-serif; }
+  .box { position: absolute; }
+  #leaf-a { left: 10px; top: 10px; width: 150px; height: 30px; }
+  #leaf-b { left: 80px; top: 10px; width: 150px; height: 30px; }
+  #nested { left: 10px; top: 60px; width: 300px; height: 30px; }
+  #wide { left: 10px; top: 110px; width: 2000px; height: 30px; white-space: nowrap; }
+  #occl-target { left: 10px; top: 160px; width: 150px; height: 30px; }
+  #occluder { left: 10px; top: 160px; width: 150px; height: 30px; background: red; }
+  #height-spacer { left: 10px; top: 200px; width: 10px; height: 900px; }
+</style>
+</head>
+<body>
+  <!-- forall-pass.html と DOM 構造は同一で、5欠陥それぞれに対応する CSS
+       値のみを変えてある:
+         - #leaf-b の left をずらして #leaf-a と重ねる（no_overlap_text_leaves）
+         - #wide の width を viewport 幅超まで広げる（no_horizontal_overflow）
+         - #occluder の pointer-events を外し #occl-target を実際に覆う
+           （all_text_visible）
+         - #height-spacer の height を大きくしてページ高さ超過にする
+           （max_page_height）
+         - #nested-child のテキストを変えて "Deploy Complete" を消す
+           （text_present の有無） -->
+  <div id="leaf-a" class="box">Ready Status Alpha</div>
+  <div id="leaf-b" class="box">Ready Status Bravo</div>
+  <div id="nested" class="box">Card Title <span id="nested-child">Deploy Pending</span></div>
+  <div id="wide" class="box">Compact line of text</div>
+  <div id="occl-target" class="box">Under The Box</div>
+  <div id="occluder" class="box"></div>
+  <div id="height-spacer" class="box"></div>
+</body>
+</html>

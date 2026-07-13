@@ -1,0 +1,29 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<style>
+  html, body { margin: 0; padding: 0; font-family: sans-serif; }
+  .box { position: absolute; }
+  #leaf-a { left: 10px; top: 10px; width: 150px; height: 30px; }
+  #leaf-b { left: 200px; top: 10px; width: 150px; height: 30px; }
+  #nested { left: 10px; top: 60px; width: 300px; height: 30px; }
+  #wide { left: 10px; top: 110px; width: 300px; height: 30px; white-space: nowrap; }
+  #occl-target { left: 10px; top: 160px; width: 150px; height: 30px; }
+  #occluder { left: 10px; top: 160px; width: 150px; height: 30px; background: red; pointer-events: none; }
+  #height-spacer { left: 10px; top: 200px; width: 10px; height: 10px; }
+</style>
+</head>
+<body>
+  <!-- forall 型アサーション（geometry.js 拡張B）のカナリア用フィクスチャ:
+       全アサーションが pass する側。forall-fail.html は DOM 構造は同一で、
+       各欠陥に対応するCSS値のみを変えたペア。 -->
+  <div id="leaf-a" class="box">Ready Status Alpha</div>
+  <div id="leaf-b" class="box">Ready Status Bravo</div>
+  <div id="nested" class="box">Card Title <span id="nested-child">Deploy Complete</span></div>
+  <div id="wide" class="box">Compact line of text</div>
+  <div id="occl-target" class="box">Under The Box</div>
+  <div id="occluder" class="box"></div>
+  <div id="height-spacer" class="box"></div>
+</body>
+</html>

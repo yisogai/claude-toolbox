@@ -1,0 +1,9 @@
+{
+  "assertions": [
+    {
+      "id": "must-exist",
+      "type": "exists",
+      "selector": "#must-exist"
+    }
+  ]
+}

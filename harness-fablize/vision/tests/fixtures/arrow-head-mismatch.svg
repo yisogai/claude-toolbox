@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  回帰テスト用フィクスチャ: 視覚的には上のボックスから下のボックスへ向かう
+  下向き矢印（矢頭 #arrow-head は下端 y=180 側にある）だが、<line> の座標
+  記述順はあえて逆（x1,y1 が下端、x2,y2 が上端）で書いてある。画素は矢頭の
+  位置だけで決まり、座標記述順は描き手の自由なので、これは「reasonable な
+  描き方の違い」であり壊れた図ではない。
+
+  - arrow_direction を head 省略（既定・座標順ベース）で "up" 判定すると
+    PASS する（従来どおりの意味論。座標順は実際 (100,180)→(100,20) で上向き）。
+  - arrow_direction を head:"#arrow-head" 指定で "down" 判定すると PASS する
+    （矢頭の実位置に基づく判定。座標記述順に依存しない）。
+  - endpoints_touch は start/end の割り当てを自動で選ぶため、座標記述順に
+    関わらず box-top / box-bottom の両方に接続していることを PASS で示す。
+-->
+<svg xmlns="http://www.w3.org/2000/svg" width="200" height="220" viewBox="0 0 200 220">
+  <rect x="0" y="0" width="200" height="220" fill="#ffffff"/>
+  <rect id="box-top" x="60" y="10" width="80" height="30" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2"/>
+  <rect id="box-bottom" x="60" y="170" width="80" height="30" fill="#dbeafe" stroke="#1d4ed8" stroke-width="2"/>
+  <line id="arrow" x1="100" y1="180" x2="100" y2="20" stroke="#334155" stroke-width="3"/>
+  <polygon id="arrow-head" points="100,180 88,158 112,158" fill="#334155"/>
+</svg>

@@ -1,0 +1,7 @@
+{
+  "assertions": [
+    {"id": "exclude-selector-suppresses", "type": "no_overlap_text_leaves", "eps": 0, "exclude_selector": ".decoy"},
+    {"id": "without-exclude-detects", "type": "no_overlap_text_leaves", "eps": 0},
+    {"id": "max-elements-truncated", "type": "all_text_visible", "max_elements": 1}
+  ]
+}
