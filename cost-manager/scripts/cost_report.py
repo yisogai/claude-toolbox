@@ -132,8 +132,11 @@ def main():
 
     # 実処理時間（active time）走査。コスト集計（rows/report）とは完全に独立しており、
     # iter_usage/Accumulator/collect_dedup_rows/aggregate には一切影響しない。
+    # invoking_session_id を渡すと、呼び出し元セッションのメインファイルはマーカー検出に
+    # 依存せず開いている最終ターン（=このレポート実行ターン自身）を無条件除外する
+    # （flush 競合対策。env 未設定なら None でマーカー検出のみのフォールバック動作）。
     gap_max_sec = float(config.get("active_gap_max_sec", 900))
-    scan = lib.scan_activity(tfiles, gap_max_sec)
+    scan = lib.scan_activity(tfiles, gap_max_sec, invoking_session_id=lib.current_session_id())
 
     # 表示用の開始/終了時刻
     # since 明示時はそれを、無指定時は「窓内に採用した生データ行の最早 timestamp」を使う

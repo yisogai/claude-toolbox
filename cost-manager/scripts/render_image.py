@@ -39,6 +39,12 @@ MUTED = (166, 172, 189)
 LINE = (38, 42, 53)
 FOOTER_COLOR = (91, 96, 112)
 
+# タイトル（タスク名）表示設定。マーカー無し運用ではタスク名＝タスク内容（長文）になりやすいため
+# 32pt/最大2行から縮小・行数拡張した。行送り34pxは元の32pt/42px比（約1.3125）を26ptに適用した値。
+TITLE_FONT_SIZE = 26
+TITLE_LINE_H = 34
+TITLE_MAX_LINES = 3
+
 
 # ---------------------------------------------------------------------------
 # 共通レイアウト計算
@@ -53,17 +59,19 @@ def _card_height(
 ) -> int:
     """カード全体の論理高さ(px)を返す（scale とは独立。実px化は _ScaledDraw.S() が担う）。
 
-    n_title_lines: タイトルの折り返し行数（最大2。1行超過分は論理42px/行で加算）。
+    n_title_lines: タイトルの折り返し行数（最大3。1行超過分は論理34px/行（TITLE_LINE_H）で加算）。
     n_desc_lines: task_desc の折り返し行数（0=非表示。表示時は論理24px/行＋余白8pxを加算）。
     total_block_h: 下段合計ブロックに確保する論理高さ。既定240は「Fable(payg)>0 かつ
     included>0」の最も背の高いケース基準（render_pillow 側が分岐に応じて実測値を渡す）。
     引数はキーワード既定値付きで拡張しているため、chrome 側（render_chrome /
     _build_card_html）の既存呼び出し（位置引数2つのみ）は無改造で動作する。
 
-    header_h の固定値 160 は「タイトル1行＋メタ情報行（経過）＋実処理時間行」の基本3行分
-    （meta["active_text"] は常に存在するため実処理時間行は常時描画される）。
+    header_h の基礎値 152 は「タイトル1行（26pt/TITLE_LINE_H=34px）＋メタ情報行（経過）＋
+    実処理時間行」の基本3行分（meta["active_text"] は常に存在するため実処理時間行は常時
+    描画される）。旧値160は32pt/42px行送り基準だったため、行送りを34pxへ縮小した差分
+    （42-34=8px）だけ引き下げている。
     """
-    header_h = 160 + max(n_title_lines - 1, 0) * 42 + (n_desc_lines * 24 + 8 if n_desc_lines else 0)
+    header_h = 152 + max(n_title_lines - 1, 0) * TITLE_LINE_H + (n_desc_lines * 24 + 8 if n_desc_lines else 0)
     table_header_h = 34
     row_h = 30
     footer_h = 50
@@ -157,6 +165,12 @@ class _ScaledDraw:
         """実px単位での文字列幅（折り返し判定用）。"""
         return self._draw.textlength(s, font=font)
 
+    def measure_logical(self, s: str, font) -> float:
+        """論理px単位での文字列幅。text()/text_right() が受け取る x 座標（pad・width と同じ
+        論理px系）と直接足し引きするための変換版（measure_px の実px結果を scale で割る）。
+        """
+        return self._draw.textlength(s, font=font) / self._scale
+
 
 def _wrap_lines(measure, text: str, max_px: float, max_lines: int) -> list:
     """text を文字単位で折り返し max_lines 行に収める（日本語向け・禁則処理なし）。
@@ -199,6 +213,20 @@ def _wrap_lines(measure, text: str, max_px: float, max_lines: int) -> list:
     return lines
 
 
+def _truncate_ellipsis(measure, text: str, max_px: float) -> str:
+    """1行のテキストを max_px に収まるよう末尾省略(…)する（収まっていればそのまま返す）。
+
+    _wrap_lines() の末尾省略ロジックと同じ考え方を1行版として切り出したもの。
+    テーブルのモデル名列が動的レイアウトの残り幅に収まらない場合の省略に使う。
+    """
+    if not text or measure(text) <= max_px:
+        return text
+    s = text
+    while s and measure(s + "…") > max_px:
+        s = s[:-1]
+    return (s + "…") if s else "…"
+
+
 def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> None:
     img_conf = config.get("image", {}) or {}
     width = int(img_conf.get("width", 1000))
@@ -235,7 +263,8 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
 
     title_text = meta.get("task_name") or "(無題タスク)"
     title_lines = _wrap_lines(
-        lambda s: probe.measure_px(s, probe.font(32, bold=True)), title_text, max_text_px, max_lines=2
+        lambda s: probe.measure_px(s, probe.font(TITLE_FONT_SIZE, bold=True)),
+        title_text, max_text_px, max_lines=TITLE_MAX_LINES,
     ) or ["(無題タスク)"]
 
     task_desc = (meta.get("task_desc") or "").strip()
@@ -257,7 +286,7 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
     draw = ImageDraw.Draw(img)
     sd = _ScaledDraw(draw, scale, load_font)
 
-    f_title = sd.font(32, bold=True)
+    f_title = sd.font(TITLE_FONT_SIZE, bold=True)
     f_desc = sd.font(16)
     f_meta = sd.font(16)
     f_th = sd.font(13)
@@ -273,7 +302,7 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
     y = pad
     for line in title_lines:
         sd.text((pad, y), line, font=f_title, fill=FG)
-        y += 42
+        y += TITLE_LINE_H
 
     # タスク内容（あれば MUTED 16pt 最大3行。空 or task_name と同一なら省略）
     if desc_lines:
@@ -298,12 +327,42 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
     y += 20
 
     # 中段: モデル別ミニ表（aggregate() のソートにより payg=Fable が先頭に来る）
+    # 列は固定x座標ではなく実測幅ベースの動的レイアウトにする（キャッシュ書込 5m/1h 併記等で
+    # 値が長くなっても隣列と接触しないように）。ヘッダ文字列と全行の値のうち描画幅が最大の
+    # ものを probe/measure で実測し、右端の列（料金）から順に「右揃え位置 − 実測最大幅 −
+    # 最小ギャップ」で1列ずつ左へ確定していく。ヘッダ・全行を同じ x 群で描画するため
+    # 右揃えの基準は常に統一される。
+    rows_cells = [_model_row_cells(m) for m in report.models]
+    COL_GAP = 24  # 列間の最小ギャップ(論理px)
+
+    def _col_max_px(header: str, values: list) -> float:
+        # 論理px（col_right の x 座標系）で測る。measure_px は実px（scale後）を返すため
+        # ここでは measure_logical を使う（実px のまま引き算すると scale>1 で列が過度に
+        # 圧迫される unit ミスマッチになるので注意）。
+        w = sd.measure_logical(header, f_th)
+        for v in values:
+            w = max(w, sd.measure_logical(v, f_td))
+        return w
+
+    cost_right = width - pad
+    cost_w = _col_max_px("料金(USD)", [c[5] for c in rows_cells])
+    output_right = cost_right - cost_w - COL_GAP
+    output_w = _col_max_px("出力", [c[4] for c in rows_cells])
+    read_right = output_right - output_w - COL_GAP
+    read_w = _col_max_px("C読取", [c[3] for c in rows_cells])
+    write_right = read_right - read_w - COL_GAP
+    write_w = _col_max_px("C書込", [c[2] for c in rows_cells])
+    input_right = write_right - write_w - COL_GAP
+    input_w = _col_max_px("入力", [c[1] for c in rows_cells])
+    # モデル名列は残り幅（pad 〜 入力列の左端の手前）を使い、収まらなければ末尾省略する。
+    name_max_px = input_right - input_w - COL_GAP - pad
+
     col_right = {
-        "input": width - pad - 420,
-        "write": width - pad - 300,
-        "read": width - pad - 180,
-        "output": width - pad - 90,
-        "cost": width - pad,
+        "input": input_right,
+        "write": write_right,
+        "read": read_right,
+        "output": output_right,
+        "cost": cost_right,
     }
     headers = [("モデル", pad, "left"), ("入力", col_right["input"], "right"),
                ("C書込", col_right["write"], "right"), ("C読取", col_right["read"], "right"),
@@ -317,9 +376,9 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
     sd.line((pad, y, width - pad, y), fill=LINE, width=1)
     y += 8
 
-    for m in report.models:
-        name, in_c, write_c, read_c, out_c, cost_c = _model_row_cells(m)
-        sd.text((pad, y), name, font=f_td, fill=FG)
+    for name, in_c, write_c, read_c, out_c, cost_c in rows_cells:
+        name_draw = _truncate_ellipsis(lambda s: sd.measure_logical(s, f_td), name, name_max_px)
+        sd.text((pad, y), name_draw, font=f_td, fill=FG)
         sd.text_right(col_right["input"], y, in_c, font=f_td, fill=FG)
         sd.text_right(col_right["write"], y, write_c, font=f_td, fill=FG)
         sd.text_right(col_right["read"], y, read_c, font=f_td, fill=FG)

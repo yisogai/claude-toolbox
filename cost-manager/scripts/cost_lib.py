@@ -600,7 +600,11 @@ def _scan_file_events(path) -> list:
     return events
 
 
-def scan_activity(tfiles: Iterable, gap_max_sec: float = 900.0) -> ActivityScan:
+def scan_activity(
+    tfiles: Iterable,
+    gap_max_sec: float = 900.0,
+    invoking_session_id: Optional[str] = None,
+) -> ActivityScan:
     """複数 transcript を走査し、活動 interval と全イベント時刻を抽出する。
 
     tfiles は collect_dedup_rows() と同じ TFile/Path/str の混在リストを受け取る
@@ -622,13 +626,28 @@ def scan_activity(tfiles: Iterable, gap_max_sec: float = 900.0) -> ActivityScan:
       L の直前のイベントもターン開始である間は L をそこまで遡らせる（連続するターン境界列
       = コマンド展開の3連続レコード等は先頭まで遡ってまとめて除外する）。
       除外が起きた L のうち最小値を report_cutoff として返す。
+
+    invoking_session_id（呼び出し元セッション ID。env CLAUDE_CODE_SESSION_ID 由来を想定）が
+    与えられた場合、そのセッションのメインファイル（TFile なら session_id、生 Path なら
+    ファイル名 stem との一致で判定）は**マーカーの有無に関係なく**最終ターン除外を無条件で
+    適用する。理由: レポートスクリプトが計測対象セッションの内側から実行されている場合、
+    そのメインファイルの開いている最終ターンは構造上必ずレポート実行ターン自身である（いま
+    自分がそのターンの tool 呼び出しとして走っているのだから）。一方、実行中の Bash tool_use
+    レコード（マーカー）は flush 競合により transcript にまだ書かれていないことがあり、
+    マーカー検出だけに頼ると除外に失敗する。マーカー検出は別セッションのファイル・
+    invoking_session_id=None（手動実行等）の場合のフォールバックとしてそのまま残る。
     """
     all_intervals: list = []
     all_event_times: list = []
     report_cutoffs: list = []
 
     for tf in tfiles:
-        path = tf.path if isinstance(tf, TFile) else Path(tf)
+        if isinstance(tf, TFile):
+            path = tf.path
+            file_session_id = tf.session_id
+        else:
+            path = Path(tf)
+            file_session_id = path.stem
         is_subagent = "subagents" in Path(path).parts
 
         events = _scan_file_events(path)
@@ -643,8 +662,15 @@ def scan_activity(tfiles: Iterable, gap_max_sec: float = 900.0) -> ActivityScan:
             if turn_start_idx:
                 idx = turn_start_idx[-1]
                 cutoff = events[idx][0]
+                # 呼び出し元セッションのメインファイルは、開いている最終ターンが構造上必ず
+                # レポート実行ターン自身のため、マーカーの有無に関係なく無条件で除外する
+                # （flush 競合でマーカーがまだ transcript に無いことがある。docstring 参照）。
+                is_invoking_main = (
+                    invoking_session_id is not None
+                    and file_session_id == invoking_session_id
+                )
                 has_marker_after = any(is_m and ts >= cutoff for ts, _, is_m in events)
-                if has_marker_after:
+                if is_invoking_main or has_marker_after:
                     # 連続するターン境界列（スラッシュコマンド展開の caveat / command-name /
                     # local-command-stdout の3連続レコード等）は run の先頭まで L を遡らせて
                     # まとめて除外する。遡らないとコマンド起動時のレコードが event_times に残り、
