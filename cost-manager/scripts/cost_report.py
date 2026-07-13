@@ -125,7 +125,8 @@ def main():
     task_name = (active.get("task_name") if active else None) or args.desc or "(タスク名未設定)"
     task_desc = args.desc
     if not task_desc:
-        task_desc = lib.find_first_user_text(tfiles, since=since_dt, until=until_dt) or task_name
+        # limit=120: PNG カードの task_desc 表示が3行（_wrap_lines）まで活かせるよう既定80から引き上げ
+        task_desc = lib.find_first_user_text(tfiles, since=since_dt, until=until_dt, limit=120) or task_name
 
     budget_usd = active.get("budget_usd") if active else None
 
@@ -180,6 +181,8 @@ def main():
             "until": end_display_utc.isoformat().replace("+00:00", "Z"),
             "total_usd": report.total_usd,
             "total_jpy": report.total_jpy,
+            "payg_usd": report.payg_usd,
+            "included_usd": report.included_usd,
             "unknown_models": report.unknown_models,
             "md_path": str(md_path),
             "png_path": str(png_path) if not args.no_image else None,

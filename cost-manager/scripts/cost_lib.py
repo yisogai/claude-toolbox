@@ -26,6 +26,7 @@ Python の対話的呼び出しで行う。
     collect_dedup_rows(paths, since, until)          -- iter_usage + Accumulator の合成ヘルパ
     load_config() / load_pricing()
     resolve_model(model, pricing) / rate_for(resolved, pricing, at)
+    billing_class(agg, pricing)                      -- "payg"(Fable) | "included"(Max20x込み) 判定
     aggregate(rows, pricing, at, usd_jpy) -> Report
     atomic_write_json / atomic_write_text
     fmt_tokens / fmt_usd / fmt_jpy / fmt_duration / to_jst / parse_iso
@@ -563,6 +564,7 @@ class ModelAgg:
     output_tokens: int = 0
     cost_usd: float = 0.0
     known: bool = True
+    billing: str = "included"
 
 
 @dataclass
@@ -575,6 +577,29 @@ class Report:
     pricing_as_of: Optional[str] = None
     usd_jpy: float = 0.0
     row_count: int = 0
+    # Fable（claude-fable-5 等）は従量課金で都度報告が必要、それ以外は Max20x サブスク込みの想定。
+    # 表示用に2バケツで小計を持つ（詳細は billing_class() / aggregate() を参照）。
+    payg_usd: float = 0.0
+    payg_jpy: float = 0.0
+    included_usd: float = 0.0
+    included_jpy: float = 0.0
+
+
+def billing_class(agg: "ModelAgg", pricing: dict) -> str:
+    """モデルの課金区分（"payg" | "included"）を判定する。
+
+    優先順位: 1) pricing.json の該当モデルエントリの "billing" フラグ
+              2) 無ければ raw な model 名（resolved 優先、無ければ生の agg.model）に
+                 "fable" を含むかどうかで判定するフォールバック。
+    pricing 未登録の将来の fable 系モデルも拾えるよう、フォールバックは resolved が
+    無い（＝未知モデル）場合でも生 model 名を見る。未知モデルは cost_usd=0 のため
+    金額には影響しないが、表示分類（テーブルの並び順・小計バケツ）は正しくなる。
+    """
+    entry = pricing.get("models", {}).get(agg.resolved) if agg.resolved else None
+    if entry and "billing" in entry:
+        return entry["billing"]
+    name = agg.resolved or agg.model
+    return "payg" if "fable" in (name or "") else "included"
 
 
 def _extract_cache_creation(usage: dict) -> tuple:
@@ -604,9 +629,12 @@ def aggregate(rows: list, pricing: dict, at: date, usd_jpy: float) -> Report:
 
     unknown_models = []
     total_usd = 0.0
+    payg_usd = 0.0
+    included_usd = 0.0
     for model, agg in by_model.items():
         resolved = resolve_model(model, pricing)
         agg.resolved = resolved
+        agg.billing = billing_class(agg, pricing)
         rate = rate_for(resolved, pricing, at) if resolved else None
         if rate is None:
             agg.known = False
@@ -621,8 +649,13 @@ def aggregate(rows: list, pricing: dict, at: date, usd_jpy: float) -> Report:
         )
         agg.cost_usd = cost
         total_usd += cost
+        if agg.billing == "payg":
+            payg_usd += cost
+        else:
+            included_usd += cost
 
-    models_sorted = sorted(by_model.values(), key=lambda a: a.model)
+    # payg（Fable = 従量課金・要都度報告）をテーブル先頭に表示する
+    models_sorted = sorted(by_model.values(), key=lambda a: (0 if a.billing == "payg" else 1, a.model))
     return Report(
         models=models_sorted,
         total_usd=total_usd,
@@ -632,6 +665,10 @@ def aggregate(rows: list, pricing: dict, at: date, usd_jpy: float) -> Report:
         pricing_as_of=pricing.get("as_of"),
         usd_jpy=usd_jpy,
         row_count=len(rows),
+        payg_usd=payg_usd,
+        payg_jpy=payg_usd * usd_jpy,
+        included_usd=included_usd,
+        included_jpy=included_usd * usd_jpy,
     )
 
 

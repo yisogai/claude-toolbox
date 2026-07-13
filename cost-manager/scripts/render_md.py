@@ -97,6 +97,10 @@ def render_report_md(report: "lib.Report", meta: dict, template_path=None) -> st
         "model_rows": build_model_rows(report),
         "total_usd": lib.fmt_usd(report.total_usd, 2),
         "total_jpy": lib.fmt_jpy(report.total_jpy),
+        "payg_usd": lib.fmt_usd(report.payg_usd, 2),
+        "payg_jpy": lib.fmt_jpy(report.payg_jpy),
+        "included_usd": lib.fmt_usd(report.included_usd, 2),
+        "included_jpy": lib.fmt_jpy(report.included_jpy),
         "usd_jpy": lib.fmt_jpy(report.usd_jpy),
         "unknown_note": build_unknown_note(report),
         "budget_note": build_budget_note(report, meta.get("budget_usd")),
@@ -147,13 +151,22 @@ def _demo_report_and_meta():
     now_jst = lib.to_jst(datetime.now(timezone.utc))
     start_jst = now_jst - timedelta(hours=1, minutes=30)
     meta = {
-        "task_name": "デモタスク: cost-manager 動作確認",
+        # 60字級の長いタスク名（PNG カードの2行折り返し・末尾省略表示を確認するため意図的に長くしている）
+        "task_name": (
+            "デモタスク: fable-cost-manager レポート改修（タイトル折り返し・タスク内容表示・"
+            "Fable小計・Retina対応）の動作確認一式"
+        ),
         "date_jst": now_jst.strftime("%Y-%m-%d"),
         "start_jst": start_jst.strftime("%H:%M"),
         "end_jst": now_jst.strftime("%H:%M"),
         "duration": lib.fmt_duration((now_jst - start_jst).total_seconds()),
         "scope": "session（デモデータ）",
-        "task_desc": "render_md.py --demo によるサンプル出力",
+        # 120字級の長い task_desc（PNG カードの3行折り返し・末尾省略表示を確認するため意図的に長くしている）
+        "task_desc": (
+            "render_md.py --demo と render_image.py --demo の両方で同一のデモデータを用い、"
+            "タイトル2行折り返し・タスク内容3行表示・Fable小計とその他モデル小計の分離表示・"
+            "Retina(2x)スケール描画の4点をまとめて目視確認するためのサンプルレポートです。"
+        ),
         "generated_at_jst": now_jst.strftime("%Y-%m-%d %H:%M:%S"),
         "budget_usd": 20.0,
     }

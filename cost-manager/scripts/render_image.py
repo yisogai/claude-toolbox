@@ -44,11 +44,25 @@ FOOTER_COLOR = (91, 96, 112)
 # 共通レイアウト計算
 # ---------------------------------------------------------------------------
 
-def _card_height(n_models: int, width: int) -> int:
-    header_h = 130
+def _card_height(
+    n_models: int,
+    width: int,
+    n_title_lines: int = 1,
+    n_desc_lines: int = 0,
+    total_block_h: int = 240,
+) -> int:
+    """カード全体の論理高さ(px)を返す（scale とは独立。実px化は _ScaledDraw.S() が担う）。
+
+    n_title_lines: タイトルの折り返し行数（最大2。1行超過分は論理42px/行で加算）。
+    n_desc_lines: task_desc の折り返し行数（0=非表示。表示時は論理24px/行＋余白8pxを加算）。
+    total_block_h: 下段合計ブロックに確保する論理高さ。既定240は「Fable(payg)>0 かつ
+    included>0」の最も背の高いケース基準（render_pillow 側が分岐に応じて実測値を渡す）。
+    引数はキーワード既定値付きで拡張しているため、chrome 側（render_chrome /
+    _build_card_html）の既存呼び出し（位置引数2つのみ）は無改造で動作する。
+    """
+    header_h = 130 + max(n_title_lines - 1, 0) * 42 + (n_desc_lines * 24 + 8 if n_desc_lines else 0)
     table_header_h = 34
     row_h = 30
-    total_block_h = 200
     footer_h = 50
     return header_h + table_header_h + row_h * max(n_models, 1) + total_block_h + footer_h
 
@@ -96,45 +110,186 @@ def _font_loader(config: dict):
     return load
 
 
-def _draw_right(draw, x_right, y, text, font, fill):
-    w = draw.textlength(text, font=font)
-    draw.text((x_right - w, y), text, font=font, fill=fill)
+class _ScaledDraw:
+    """論理座標系のまま呼び出せる、Retina(2x等)スケール描画用の薄いラッパ。
+
+    定数群（pad・行送り等）は既存の論理pxのまま維持し、実ピクセル化だけをここに集約する。
+    フォントは font() が最初から実サイズ（S(size)）で読み込む（キャッシュ付き）ため、
+    textlength() は常に実px同士の比較になり、論理pxとの混在は起きない。
+    """
+
+    def __init__(self, draw: "ImageDraw.ImageDraw", scale: float, load_font) -> None:
+        self._draw = draw
+        self._scale = scale
+        self._load_font = load_font
+        self._font_cache: dict = {}
+
+    def S(self, v: float) -> int:
+        """論理px -> 実px。"""
+        return int(round(v * self._scale))
+
+    def font(self, size: int, bold: bool = False):
+        key = (size, bold)
+        f = self._font_cache.get(key)
+        if f is None:
+            f = self._load_font(self.S(size), bold=bold)
+            self._font_cache[key] = f
+        return f
+
+    def text(self, xy, s: str, font, fill) -> None:
+        x, y = xy
+        self._draw.text((self.S(x), self.S(y)), s, font=font, fill=fill)
+
+    def text_right(self, x_right: float, y: float, s: str, font, fill) -> None:
+        w = self._draw.textlength(s, font=font)
+        self._draw.text((self.S(x_right) - w, self.S(y)), s, font=font, fill=fill)
+
+    def line(self, xy, fill, width: int = 1) -> None:
+        x0, y0, x1, y1 = xy
+        self._draw.line(
+            (self.S(x0), self.S(y0), self.S(x1), self.S(y1)), fill=fill, width=max(1, self.S(width))
+        )
+
+    def measure_px(self, s: str, font) -> float:
+        """実px単位での文字列幅（折り返し判定用）。"""
+        return self._draw.textlength(s, font=font)
+
+
+def _wrap_lines(measure, text: str, max_px: float, max_lines: int) -> list:
+    """text を文字単位で折り返し max_lines 行に収める（日本語向け・禁則処理なし）。
+
+    measure(s) は実px幅を返す callable。改行は空白に置換してから折り返す。
+    max_lines を超える分がある場合は最終行を "…" が max_px に収まるまで縮めて付与する。
+    1文字も入らない極端なケース（max_px が極端に小さい等）でも無限ループしない
+    （`or not cur` で強制的に1文字は積む）。
+    """
+    text = (text or "").replace("\r", " ").replace("\n", " ")
+    if not text:
+        return []
+
+    lines: list = []
+    cur = ""
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        candidate = cur + ch
+        if measure(candidate) <= max_px or not cur:
+            cur = candidate
+            i += 1
+        else:
+            lines.append(cur)
+            cur = ""
+            if len(lines) >= max_lines:
+                break
+
+    if cur and len(lines) < max_lines:
+        lines.append(cur)
+
+    if i < n:
+        # 収まりきらない残りがある -> 最終行を "…" 付きで max_px に収める
+        lines = lines[:max_lines] or [""]
+        last = lines[-1]
+        while last and measure(last + "…") > max_px:
+            last = last[:-1]
+        lines[-1] = (last + "…") if last else "…"
+    return lines
 
 
 def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> None:
-    width = int((config.get("image", {}) or {}).get("width", 1000))
+    img_conf = config.get("image", {}) or {}
+    width = int(img_conf.get("width", 1000))
+    scale = max(1.0, min(float(img_conf.get("scale", 2)), 4.0))
     n_models = max(len(report.models), 1)
-    height = _card_height(n_models, width)
-
-    img = Image.new("RGB", (width, height), BG)
-    draw = ImageDraw.Draw(img)
 
     load_font = _font_loader(config)
-    f_title = load_font(32, bold=True)
-    f_meta = load_font(16)
-    f_th = load_font(13)
-    f_td = load_font(15)
-    f_total = load_font(52, bold=True)
-    f_jpy = load_font(20)
-    f_footer = load_font(12)
-
     pad = 40
-    y = pad
 
-    # 上段: タスク名 + 日付/時間帯
-    draw.text((pad, y), meta.get("task_name") or "(無題タスク)", font=f_title, fill=FG)
-    y += 44
+    # 下段合計ブロックの行送り定数（高さ計算 _bottom_block_h() と実描画の両方で共有し、
+    # 数値の二重管理を避ける）。
+    SUB_LABEL_H = 22   # ラベル行 -> ヒーロー行
+    HERO_H = 76        # ヒーロー行 -> JPY換算行
+    JPY_H = 30         # JPY換算行 -> 次要素（included行 / 罫線+合計行 / ここで終端）
+    INCLUDED_H = 26    # その他モデル参考行（included_usd>0 のときのみ加算）
+    CLEARANCE_H = 16   # 罫線+合計行手前のクリアランス（payg>0 ケースのみ）
+    TAIL_PAD = 70      # 最終行から footer までの余白（旧固定値 total_block_h=240 を
+                       # 「payg>0 かつ included>0」ケース= 170 + 70 として踏襲）
+
+    def _bottom_block_h() -> int:
+        """下段合計ブロックの必要高さ(total_block_h)を描画分岐に応じて計算する。"""
+        r = SUB_LABEL_H + HERO_H + JPY_H
+        if report.payg_usd > 0:
+            if report.included_usd > 0:
+                r += INCLUDED_H
+            r += CLEARANCE_H
+        return r + TAIL_PAD
+
+    # ①フォント準備（計測・本描画とも同じ _ScaledDraw.font() 経由で実サイズを共有する）
+    #   ②計測用ダミー Draw でタイトル/desc の行数を先に確定する（高さ計算に必要なため）
+    dummy_draw = ImageDraw.Draw(Image.new("RGB", (10, 10)))
+    probe = _ScaledDraw(dummy_draw, scale, load_font)
+    max_text_px = probe.S(width) - 2 * probe.S(pad)
+
+    title_text = meta.get("task_name") or "(無題タスク)"
+    title_lines = _wrap_lines(
+        lambda s: probe.measure_px(s, probe.font(32, bold=True)), title_text, max_text_px, max_lines=2
+    ) or ["(無題タスク)"]
+
+    task_desc = (meta.get("task_desc") or "").strip()
+    task_name_stripped = (meta.get("task_name") or "").strip()
+    desc_lines: list = []
+    if task_desc and task_desc != task_name_stripped:
+        desc_lines = _wrap_lines(
+            lambda s: probe.measure_px(s, probe.font(16)), task_desc, max_text_px, max_lines=3
+        )
+
+    # ③ _card_height で高さ計算 -> ④実画像生成
+    height = _card_height(
+        n_models, width,
+        n_title_lines=len(title_lines), n_desc_lines=len(desc_lines),
+        total_block_h=_bottom_block_h(),
+    )
+
+    img = Image.new("RGB", (probe.S(width), probe.S(height)), BG)
+    draw = ImageDraw.Draw(img)
+    sd = _ScaledDraw(draw, scale, load_font)
+
+    f_title = sd.font(32, bold=True)
+    f_desc = sd.font(16)
+    f_meta = sd.font(16)
+    f_th = sd.font(13)
+    f_td = sd.font(15)
+    f_sub_label = sd.font(15)
+    f_hero = sd.font(64, bold=True)
+    f_hero_jpy = sd.font(20)
+    f_sub_other = sd.font(14)
+    f_grand = sd.font(22)
+    f_footer = sd.font(12)
+
+    # ⑤描画: 上段 タスク名（最大2行折り返し）
+    y = pad
+    for line in title_lines:
+        sd.text((pad, y), line, font=f_title, fill=FG)
+        y += 42
+
+    # タスク内容（あれば MUTED 16pt 最大3行。空 or task_name と同一なら省略）
+    if desc_lines:
+        for line in desc_lines:
+            sd.text((pad, y), line, font=f_desc, fill=MUTED)
+            y += 24
+        y += 8
+
     meta_line = (
         f"{meta.get('date_jst', '')}（JST） "
         f"{meta.get('start_jst', '')} 〜 {meta.get('end_jst', '')}"
         f"（実働 {meta.get('duration', '')}）"
     )
-    draw.text((pad, y), meta_line, font=f_meta, fill=MUTED)
+    sd.text((pad, y), meta_line, font=f_meta, fill=MUTED)
     y += 34
-    draw.line((pad, y, width - pad, y), fill=LINE, width=1)
+    sd.line((pad, y, width - pad, y), fill=LINE, width=1)
     y += 20
 
-    # 中段: モデル別ミニ表
+    # 中段: モデル別ミニ表（aggregate() のソートにより payg=Fable が先頭に来る）
     col_right = {
         "input": width - pad - 420,
         "write": width - pad - 300,
@@ -147,38 +302,73 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
                ("出力", col_right["output"], "right"), ("料金(USD)", col_right["cost"], "right")]
     for text, x, align in headers:
         if align == "left":
-            draw.text((x, y), text, font=f_th, fill=MUTED)
+            sd.text((x, y), text, font=f_th, fill=MUTED)
         else:
-            _draw_right(draw, x, y, text, f_th, MUTED)
+            sd.text_right(x, y, text, font=f_th, fill=MUTED)
     y += 22
-    draw.line((pad, y, width - pad, y), fill=LINE, width=1)
+    sd.line((pad, y, width - pad, y), fill=LINE, width=1)
     y += 8
 
     for m in report.models:
         name, in_c, write_c, read_c, out_c, cost_c = _model_row_cells(m)
-        draw.text((pad, y), name, font=f_td, fill=FG)
-        _draw_right(draw, col_right["input"], y, in_c, f_td, FG)
-        _draw_right(draw, col_right["write"], y, write_c, f_td, FG)
-        _draw_right(draw, col_right["read"], y, read_c, f_td, FG)
-        _draw_right(draw, col_right["output"], y, out_c, f_td, FG)
-        _draw_right(draw, col_right["cost"], y, cost_c, f_td, FG)
+        sd.text((pad, y), name, font=f_td, fill=FG)
+        sd.text_right(col_right["input"], y, in_c, font=f_td, fill=FG)
+        sd.text_right(col_right["write"], y, write_c, font=f_td, fill=FG)
+        sd.text_right(col_right["read"], y, read_c, font=f_td, fill=FG)
+        sd.text_right(col_right["output"], y, out_c, font=f_td, fill=FG)
+        sd.text_right(col_right["cost"], y, cost_c, font=f_td, fill=FG)
         y += 30
-        draw.line((pad, y - 8, width - pad, y - 8), fill=LINE, width=1)
+        sd.line((pad, y - 8, width - pad, y - 8), fill=LINE, width=1)
 
     y += 18
 
-    # 下段: 大きく合計 USD / JPY
-    total_usd_text = f"${lib.fmt_usd(report.total_usd, 2)}"
-    _draw_right(draw, width - pad, y, total_usd_text, f_total, FG)
-    y += 62
-    total_jpy_text = f"¥{lib.fmt_jpy(report.total_jpy)}（1 USD = {lib.fmt_jpy(report.usd_jpy)} 円）"
-    _draw_right(draw, width - pad, y, total_jpy_text, f_jpy, MUTED)
+    # 下段: Fable を最大表示（従量課金・要都度報告）、その他は参考、合計は別途表示
+    if report.payg_usd > 0:
+        sd.text_right(width - pad, y, "Fable（従量課金・要都度報告）", font=f_sub_label, fill=MUTED)
+        y += SUB_LABEL_H
+        sd.text_right(width - pad, y, f"${lib.fmt_usd(report.payg_usd, 2)}", font=f_hero, fill=FG)
+        y += HERO_H
+        sd.text_right(
+            width - pad, y,
+            f"¥{lib.fmt_jpy(report.payg_jpy)}（1 USD = {lib.fmt_jpy(report.usd_jpy)} 円）",
+            font=f_hero_jpy, fill=MUTED,
+        )
+        y += JPY_H
+        if report.included_usd > 0:
+            sd.text_right(
+                width - pad, y,
+                f"その他モデル（Max20x込み・参考）: ${lib.fmt_usd(report.included_usd, 2)} / "
+                f"¥{lib.fmt_jpy(report.included_jpy)}",
+                font=f_sub_other, fill=MUTED,
+            )
+            y += INCLUDED_H
+        y += CLEARANCE_H
+        sd.line((pad, y - 8, width - pad, y - 8), fill=LINE, width=1)
+        sd.text_right(
+            width - pad, y,
+            f"合計  ${lib.fmt_usd(report.total_usd, 2)} / ¥{lib.fmt_jpy(report.total_jpy)}",
+            font=f_grand, fill=FG,
+        )
+    else:
+        # Fable コスト0（opus/sonnet 等のみ）: ヒーローは合計に切替え、Fable行は「なし」を小さく添える
+        sd.text_right(
+            width - pad, y, "合計（Max20x サブスク込み・従量課金なし）", font=f_sub_label, fill=MUTED
+        )
+        y += SUB_LABEL_H
+        sd.text_right(width - pad, y, f"${lib.fmt_usd(report.total_usd, 2)}", font=f_hero, fill=FG)
+        y += HERO_H
+        sd.text_right(
+            width - pad, y,
+            f"¥{lib.fmt_jpy(report.total_jpy)}（1 USD = {lib.fmt_jpy(report.usd_jpy)} 円）",
+            font=f_hero_jpy, fill=MUTED,
+        )
+        y += JPY_H
+        sd.text_right(width - pad, y, "Fable（従量課金）: なし", font=f_sub_other, fill=MUTED)
 
     # 隅: 単価 as_of
     stale_note = "（単価が古い可能性あり）" if report.stale else ""
     footer_text = f"単価 as_of: {report.pricing_as_of or '(不明)'}{stale_note}"
-    fw = draw.textlength(footer_text, font=f_footer)
-    draw.text((width - pad - fw, height - 26), footer_text, font=f_footer, fill=FOOTER_COLOR)
+    sd.text_right(width - pad, height - 26, footer_text, font=f_footer, fill=FOOTER_COLOR)
 
     img.save(out_path, format="PNG")
 
@@ -186,6 +376,10 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
 # ---------------------------------------------------------------------------
 # Chrome 版
 # ---------------------------------------------------------------------------
+# 凍結: これは pillow 版の失敗時フォールバック専用の簡易版。task_desc 表示・
+# Fable/その他小計・Retina(2x) 対応等の新機能は pillow 版のみに実装している。
+# 正となるレイアウトは常に render_pillow() 側。二重メンテを避けるため本関数と
+# card.html.tmpl はこれ以上拡張しない方針とする。
 
 def _build_card_html(report: "lib.Report", meta: dict, width: int) -> str:
     tmpl_path = lib.code_root() / "templates" / "card.html.tmpl"

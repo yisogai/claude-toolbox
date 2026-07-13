@@ -4,6 +4,7 @@
   "image": {
     "renderer": "pillow",
     "width": 1000,
+    "scale": 2,
     "font_candidates": [
       "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
       "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"
