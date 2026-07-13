@@ -13,7 +13,7 @@
 | 層 | 実体 | 役割 | 種別 |
 |---|---|---|---|
 | 1 | `scripts/model_policy_agent_hook.sh`（PreToolUse `Agent\|Task`） | fork→deny / fable→deny / 未指定・inherit→`updatedInput` で opus に書き換え / allowed は素通し | **強制** |
-| 1b | `scripts/model_policy_workflow_hook.sh`（PreToolUse `Workflow`） | script に `agent(` があり `model` 語が一度も無い→deny / `fable` 名指し→deny | **強制** |
+| 1b | `scripts/model_policy_workflow_hook.sh`（PreToolUse `Workflow`） | script に `agent(` があり `model` 語が一度も無い→deny / `model` 値に `fable`→deny | **強制** |
 | 2 | `~/.claude/CLAUDE.md` への追記 | fable=統括専任・作業を opus/sonnet に振り分けて委譲・agent() は model 明示・fork 禁止 | 規範（システムコンテキスト常駐で compact 後も残る） |
 | 3 | `scripts/model_policy.sh`（`/model-policy` スキル） | `status/relax/reset/off/enforce` の運用 CLI | 運用 |
 | 4 | `scripts/model_policy_reminder_hook.sh`（UserPromptSubmit） | 緩和中のときだけ「残り時間・戻し方」を注入（enforce 時は無出力=トークンゼロ） | 可視化 |
@@ -46,7 +46,7 @@
 
 - **jq**（必須）。不在の場合 hook は素通し（フェイルオープン）＝強制が効かない。
 - **macOS**（BSD `date`）。CLI の `relax` は `date -v +${分}M +%s` を使う。**Linux（GNU date）でも動く**ように `date -d "+${分} minutes" +%s` へ自動フォールバックする（`scripts/model_policy.sh` の `future_epoch()`）。
-- **Claude Code バージョン**: 動作確認済みバージョン → **2.1.202**（2026-07-07 検証。実機で確認済み: model 未指定→opus 書き換え〔サブエージェントのモデルID自己申告で `claude-opus-4-8[1m]` を確認〕、fable 指定→deny、fork→deny、relax 中の fable 通過→reset で deny 復帰、Workflow の model 語ゼロ/fable 名指し→deny、model 明示 Workflow→通過）。本システムは以下の文書化仕様に依存する:
+- **Claude Code バージョン**: 動作確認済みバージョン → **2.1.202**（2026-07-07 検証。実機で確認済み: model 未指定→opus 書き換え〔サブエージェントのモデルID自己申告で `claude-opus-4-8[1m]` を確認〕、fable 指定→deny、fork→deny、relax 中の fable 通過→reset で deny 復帰、Workflow の model 語ゼロ→deny / model 値 fable→deny（2026-07-13 再検証。fable 文字列を含むが model 明示の script は通過））。本システムは以下の文書化仕様に依存する:
   - サブエージェント起動ツール名 `Agent`（v2.1.63 で `Task` から改称、`Task` はエイリアス）。matcher は `"Agent|Task"`。
   - PreToolUse hook の `hookSpecificOutput.updatedInput`（入力書き換え）と `permissionDecision:"deny"`＋`permissionDecisionReason`（理由付き拒否）。
   - モデル解決順: env `CLAUDE_CODE_SUBAGENT_MODEL` > per-invocation `model` > agent 定義 frontmatter > **メイン会話モデル継承（=Fable）**。

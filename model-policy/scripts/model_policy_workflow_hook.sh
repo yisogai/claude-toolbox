@@ -5,15 +5,18 @@
 #   Workflow / ultracode の script 内 agent() 呼び出しは、Agent hook（層1）を通らない前提
 #（不明のため安全側に倒す）。そこで Workflow ツールの tool_input.script を「静的に文字列検査」し、
 #   サブエージェントが fable を継承/指定する2パターンだけを deny する:
-#     (1) script に fable / Fable の文字列が含まれる  → deny
+#     (1) model キーの引用符/バックティック付き値に fable が入る（例 model: "fable" / "model":"claude-fable-5"）→ deny
 #     (2) script に agent( はあるのに model の語が一度も無い → deny（既定で fable 継承になるため）
 #   agent( を含まない script は素通し。
 #
 # 設計上の判断:
 #   - 部分パース（agent() 個別の model 有無判定）は誤検知源になるため行わない。
-#     文字列一致は bash の case（*"agent("* 等）で行う。一部の agent() だけ model 未指定という
-#     ケースは取りこぼす=既知の限界（層2 CLAUDE.md 規律で補完。SKILL.md に明記）。
-#   - フェイルオープン: script が取れない / jq 不在 / off・relaxed のときは素通し（exit 0）。
+#     agent( の有無は bash の case（*"agent("* 等）で判定する。一部の agent() だけ model 未指定
+#     というケースは取りこぼす=既知の限界（層2 CLAUDE.md 規律で補完。SKILL.md に明記）。
+#   - 検査(1)は model キーの「引用符/バックティック付き値」だけに絞って fable を照合する
+#     （grep -Ei、BSD 互換 ERE）。リポ名 fable-cost-manager・env FABLE_COST_MANAGER_ROOT・
+#     prompt 文字列中の fable には反応しない。model 値が未クォート（変数）の場合は照合外＝素通し。
+#   - フェイルオープン: script が取れない / jq 不在 / grep 不在・不一致 / off・relaxed のときは素通し（exit 0）。
 #   - 意図的な deny の JSON 出力以外は必ず exit 0。
 
 INPUT="$(cat)"
@@ -98,12 +101,14 @@ fi
 # --- agent( を含む場合のみ検査 -------------------------------------------------
 case "$SCRIPT" in
   *"agent("*)
-    # (1) fable / Fable を含む → deny
-    case "$SCRIPT" in
-      *fable*|*Fable*)
-        emit_deny 'モデルポリシー: Workflow script 内で fable が指定されています。サブエージェントへの fable 割り当ては禁止です。全 agent() の opts.model を "opus"（探索段は "sonnet" 可）に修正して再実行してください。'
-        ;;
-    esac
+    # (1) model キーの引用符/バックティック付き値に fable → deny
+    #     concept: /model["'`]?\s*[:=]\s*["'`][^"'`]*fable/i
+    #     BSD grep 互換の ERE（\s は使わず [[:space:]]）。fable-cost-manager /
+    #     FABLE_COST_MANAGER_ROOT / prompt 文字列中の fable には反応しない。
+    FABLE_MODEL_RE="model[\"'\`]?[[:space:]]*[:=][[:space:]]*[\"'\`][^\"'\`]*fable"
+    if printf '%s' "$SCRIPT" | grep -Eiq "$FABLE_MODEL_RE"; then
+      emit_deny 'モデルポリシー: Workflow script の agent() で model 値に fable が指定されています。サブエージェントへの fable 割り当ては禁止です。全 agent() の opts.model を "opus"（探索段は "sonnet" 可）に修正して再実行してください。'
+    fi
     # (2) model の語が一度も無い → deny
     case "$SCRIPT" in
       *model*) : ;;  # model の語がどこかにある → 取りこぼし（部分パースはしない）。素通し。
