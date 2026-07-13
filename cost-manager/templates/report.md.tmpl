@@ -1,0 +1,17 @@
+# コストレポート — ${task_name}
+
+- 日付: ${date_jst}（JST） / 時間帯: ${start_jst} 〜 ${end_jst}（実働 ${duration}）
+- 対象範囲: ${scope}
+- タスク内容: ${task_desc}
+
+## モデル別内訳
+
+| モデル | 入力(uncached) | キャッシュ書込(5m/1h) | キャッシュ読取 | 出力 | 料金(USD) |
+| --- | ---: | ---: | ---: | ---: | ---: |
+${model_rows}
+
+## 合計
+
+- USD: $$${total_usd} / JPY: ¥${total_jpy}（参考レート 1 USD = ${usd_jpy} 円）
+${unknown_note}${budget_note}
+--- 単価 as_of: ${pricing_as_of}${stale_note} / 生成: ${generated_at_jst}

@@ -1,0 +1,12 @@
+# 生成物・実行時状態は追跡しない（フェーズ1計画 docs/design.md 参照）
+var/**
+!var/.gitkeep
+reports/**
+!reports/.gitkeep
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

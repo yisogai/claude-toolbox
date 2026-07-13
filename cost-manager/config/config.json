@@ -1,0 +1,17 @@
+{
+  "usd_jpy": 160,
+  "default_scope": "session",
+  "image": {
+    "renderer": "pillow",
+    "width": 1000,
+    "font_candidates": [
+      "/System/Library/Fonts/ヒラギノ角ゴシック W6.ttc",
+      "/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc"
+    ]
+  },
+  "budget": {
+    "default_thresholds": [50, 80, 100],
+    "monitor_cache_ttl_sec": 25,
+    "desktop_notify": false
+  }
+}
