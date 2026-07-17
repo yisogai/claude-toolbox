@@ -1,0 +1,54 @@
+{
+  "name": "claude-file-paste",
+  "displayName": "Claude File Paste",
+  "description": "Paste clipboard images/files into the VS Code terminal as file paths for Claude Code — works from a Mac client over Remote-SSH",
+  "version": "2.0.0",
+  "publisher": "local",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.74.0"
+  },
+  "categories": ["Other"],
+  "keywords": ["claude", "clipboard", "paste", "terminal", "remote"],
+  "extensionKind": ["ui"],
+  "activationEvents": [],
+  "main": "./extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "claude-file-paste.pasteFile",
+        "title": "Paste File for Claude",
+        "category": "Claude"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "claude-file-paste.pasteFile",
+        "key": "ctrl+shift+alt+i",
+        "mac": "cmd+shift+alt+i",
+        "when": "terminalFocus"
+      }
+    ],
+    "configuration": {
+      "title": "Claude File Paste",
+      "properties": {
+        "claudeFilePaste.remoteDir": {
+          "type": "string",
+          "default": "/tmp/claude_paste",
+          "description": "リモート (SSH/WSL) 側でファイルを保存するディレクトリ"
+        },
+        "claudeFilePaste.maxFileSizeMB": {
+          "type": "number",
+          "default": 50,
+          "description": "リモートへ転送する 1 ファイルあたりの上限サイズ (MB)"
+        },
+        "claudeFilePaste.insertMethod": {
+          "type": "string",
+          "enum": ["sendText", "sendSequence"],
+          "default": "sendText",
+          "description": "ターミナルへの挿入方法。sendText で文字が入らない場合は sendSequence に変更してください"
+        }
+      }
+    }
+  }
+}
