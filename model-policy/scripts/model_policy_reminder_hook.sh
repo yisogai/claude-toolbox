@@ -5,7 +5,7 @@
 #   次の3条件のいずれかのときだけ、毎プロンプトの冒頭に additionalContext を注入する:
 #   (1) 緩和中（relaxed）: 残り時間・戻し方（従来動作）
 #   (2) settings.json の恒久 model が fable: メインモデル・ドリフト警告（opus 運用への計器）
-#   (3) fable 例外（fable_exempt_until）の失効48時間前: 失効予告
+#   (3) fable 例外の TTL（fable_exempt_until、任意設定・既定無効）の失効48時間前: 失効予告
 #   平常時（enforce・model=opus・例外余裕あり）は無出力（トークンゼロ）。
 #   戻し忘れ/ドリフト/失効事故を構造的に防ぐための可視化。
 #

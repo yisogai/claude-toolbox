@@ -8,9 +8,11 @@
 #   reset           relaxed_until=null（即 enforce 復帰）。
 #   off             mode="off"（キルスイッチ）。
 #   enforce         mode="enforce" かつ relaxed_until=null。
-#   exempt [日数]   fable 例外（fable_exempt_subagent_types）の有効期限を now+日数 に設定
-#                   （既定14・1〜90にクランプ）。exempt off で期限を即解除（例外は無効化）。
-#                   例外リスト自体の編集は policy.json を直接編集する（README §7-4）。
+#   exempt [日数]   fable 例外（fable_exempt_subagent_types）に任意の TTL を設定
+#                   （now+日数、既定14・1〜90にクランプ。期限切れ後は deny）。
+#   exempt clear    TTL を解除して無期限に戻す（既定状態。登録済み例外は常時有効）。
+#   exempt disable  例外リストを空にして fable 例外を完全停止。
+#                   例外リストへの登録は policy.json を直接編集する（README §7-4）。
 #   --project <sub> 対象を cwd の ./.claude/model-policy.json に切替（タスク/プロジェクト単位スコープ）。
 #
 # 設計上の厳守事項:
@@ -160,15 +162,17 @@ show_status() {
   echo "on_fable      : ${ON_FABLE}"
   echo "deny_fork     : ${DENY_FORK}"
   echo "relaxed_until : ${RUNTIL}（0=緩和なし）"
-  # fable 例外（fable_exempt_subagent_types + fable_exempt_until）の可視化。
-  # 戻し忘れ/期限切れの検知手段として、残り日数 or 期限切れを明示する。
+  # fable 例外（fable_exempt_subagent_types + 任意 TTL fable_exempt_until）の可視化。
+  # 既定は TTL 無効（無期限）。TTL 設定時のみ残り日数 / 期限切れを明示する。
   if [ -n "$EXEMPT" ]; then
-    if [ "$EXUNTIL" -gt "$now" ] 2>/dev/null; then
+    if [ "$EXUNTIL" -eq 0 ] 2>/dev/null; then
+      echo "fable例外     : ${EXEMPT}（無期限・TTL 無効=既定。停止は exempt disable）"
+    elif [ "$EXUNTIL" -gt "$now" ] 2>/dev/null; then
       ex_days=$(( (EXUNTIL - now + 86399) / 86400 ))
       ex_until_h="$(date -r "$EXUNTIL" '+%m/%d %H:%M' 2>/dev/null)"
-      echo "fable例外     : ${EXEMPT}（有効・残り約 ${ex_days} 日、${ex_until_h} まで）"
+      echo "fable例外     : ${EXEMPT}（TTL 有効・残り約 ${ex_days} 日、${ex_until_h} まで）"
     else
-      echo "fable例外     : ${EXEMPT}（期限切れ→deny 動作。延長は exempt [日数]）"
+      echo "fable例外     : ${EXEMPT}（TTL 期限切れ→deny 動作。延長 exempt [日数] / 解除 exempt clear）"
     fi
   else
     echo "fable例外     : （なし）"
@@ -221,32 +225,42 @@ case "$SUBCMD" in
     show_status
     ;;
   exempt)
-    if [ "$ARG" = "off" ]; then
-      apply_jq '.fable_exempt_until = null'
-      echo "fable 例外の有効期限を解除しました（登録済み subagent_type も即 deny 動作へ。対象: ${SCOPE_LABEL}）。"
-    else
-      DAYS="$ARG"
-      case "$DAYS" in ''|*[!0-9]*) DAYS=14;; esac
-      [ "$DAYS" -lt 1 ]  && DAYS=1
-      [ "$DAYS" -gt 90 ] && DAYS=90
-      UNTIL="$(future_epoch $(( DAYS * 1440 )))"
-      case "$UNTIL" in
-        ''|*[!0-9]*) echo "時刻計算に失敗しました（date コマンドの互換性問題の可能性）。" ;;
-        *)
-          apply_jq '.fable_exempt_until = $t' --argjson t "$UNTIL"
-          echo "fable 例外の有効期限を ${DAYS} 日後に設定しました（対象: ${SCOPE_LABEL}）。"
-          # リストが空だと期限だけあっても例外は成立しない。気づけるように注意を出す。
-          n="$(jq -r '(.fable_exempt_subagent_types // []) | length' "$POLICY_FILE" 2>/dev/null)"
-          case "$n" in ''|0) echo "注意: fable_exempt_subagent_types が空です。例外を有効にするには policy.json にサブエージェント名（例: \"fable-advisor\"）を登録してください（README §7-4）。";; esac
-          ;;
-      esac
-    fi
+    case "$ARG" in
+      clear)
+        apply_jq '.fable_exempt_until = null'
+        echo "fable 例外の TTL を解除しました（登録済み subagent_type は無期限で有効=既定状態。対象: ${SCOPE_LABEL}）。"
+        ;;
+      disable)
+        apply_jq '.fable_exempt_subagent_types = [] | .fable_exempt_until = null'
+        echo "fable 例外を無効化しました（登録リストを空にしました。再開は policy.json への再登録。対象: ${SCOPE_LABEL}）。"
+        ;;
+      off)
+        echo "exempt off は廃止されました。TTL 解除（無期限化）は exempt clear、例外の完全停止は exempt disable を使ってください。"
+        ;;
+      *)
+        DAYS="$ARG"
+        case "$DAYS" in ''|*[!0-9]*) DAYS=14;; esac
+        [ "$DAYS" -lt 1 ]  && DAYS=1
+        [ "$DAYS" -gt 90 ] && DAYS=90
+        UNTIL="$(future_epoch $(( DAYS * 1440 )))"
+        case "$UNTIL" in
+          ''|*[!0-9]*) echo "時刻計算に失敗しました（date コマンドの互換性問題の可能性）。" ;;
+          *)
+            apply_jq '.fable_exempt_until = $t' --argjson t "$UNTIL"
+            echo "fable 例外に TTL を設定しました（${DAYS} 日後に失効→deny。解除は exempt clear。対象: ${SCOPE_LABEL}）。"
+            # リストが空だと TTL だけあっても例外は成立しない。気づけるように注意を出す。
+            n="$(jq -r '(.fable_exempt_subagent_types // []) | length' "$POLICY_FILE" 2>/dev/null)"
+            case "$n" in ''|0) echo "注意: fable_exempt_subagent_types が空です。例外を有効にするには policy.json にサブエージェント名（例: \"fable-advisor\"）を登録してください（README §7-4）。";; esac
+            ;;
+        esac
+        ;;
+    esac
     echo
     show_status
     ;;
   *)
     echo "不明なサブコマンド: ${SUBCMD}"
-    echo "使い方: model_policy.sh [--project] {status|relax [分]|reset|off|enforce|exempt [日数]|exempt off}"
+    echo "使い方: model_policy.sh [--project] {status|relax [分]|reset|off|enforce|exempt [日数]|exempt clear|exempt disable}"
     echo
     show_status
     ;;

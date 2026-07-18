@@ -144,29 +144,31 @@ if [ "$SUBTYPE" = "fork" ] && [ "$DENY_FORK" = "true" ]; then
   emit_deny 'モデルポリシー: fork サブエージェントは親（メインループ=fable）のモデルを継承するため禁止です。subagent_type を明示した通常の Agent 呼び出しに model:"opus"（既定）または "sonnet"（調査等の定型作業）を付けて実行してください。fork がどうしても必要な場合は、ユーザーに /model-policy relax の実行を依頼してください。'
 fi
 
-# --- 4b. fable 例外（TTL 内のみ）: 登録済み subagent_type は素通し ---------------
-# fable_exempt_subagent_types に SUBTYPE が完全一致し、かつ now < fable_exempt_until の
-# ときだけ、以降の fable deny / 空 model 書き換えを飛ばして通す（例: fable-advisor）。
-# fork は上の 4 で既に deny 済み（subagent_type="fork" は例外リストに登録しない運用）。
-# TTL は「Fable の課金条件変化（プロモ終了→従量課金化）で例外が黙って実費を生む」事故を
-# 期限切れ→自動 deny で防ぐ安全側フェイル。延長は model_policy.sh exempt <日数>。
-if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ] && [ "$EXUNTIL" -gt "$NOW" ] 2>/dev/null; then
-  for t in $EXEMPT; do
-    [ "$SUBTYPE" = "$t" ] && exit 0
-  done
+# --- 4b. fable 例外: 登録済み subagent_type は素通し -----------------------------
+# fable_exempt_subagent_types に SUBTYPE が完全一致すれば、以降の fable deny /
+# 空 model 書き換えを飛ばして通す（例: fable-advisor）。fork は上の 4 で既に deny 済み。
+# fable_exempt_until は「任意の TTL」: 0/null（既定）= 無期限で有効。epoch 秒を設定した
+# 場合のみ期限付きになり、期限切れは 4c の明示 deny に倒れる。
+# （Fable は 2026-07-20 以降 Max 恒久包含〔リミットの50%まで〕が公式確認済みのため TTL は
+#   既定無効。従量課金へ方針転換されたら model_policy.sh exempt <日数> で時限運用へ切替。）
+if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ]; then
+  if [ "$EXUNTIL" -eq 0 ] 2>/dev/null || [ "$EXUNTIL" -gt "$NOW" ] 2>/dev/null; then
+    for t in $EXEMPT; do
+      [ "$SUBTYPE" = "$t" ] && exit 0
+    done
+  fi
 fi
 
-# --- 4c. 例外登録済みだが TTL 切れ → 明示 deny（黙って opus に化けさせない）------
-# ここに来るのは 4b を通過しなかった（=TTL 切れ or リスト外）場合。登録済みの
-# subagent_type が fable になるはずの呼び出し（model 空/inherit/fable）は、rewrite で
-# 静かに opus 化すると「advisor のつもりが opus だった」品質事故になるため、理由付きで
-# 拒否して気づかせる。明示的に opus/sonnet を指定した呼び出しは通常フローへ流す。
-if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ]; then
+# --- 4c. 例外登録済みだが TTL 切れ（TTL 設定時のみ）→ 明示 deny ------------------
+# rewrite で静かに opus 化すると「advisor のつもりが opus だった」品質事故になるため、
+# fable になるはずの呼び出し（model 空/inherit/fable）は理由付きで拒否して気づかせる。
+# 明示的に opus/sonnet を指定した呼び出しは通常フローへ流す。
+if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ] && [ "$EXUNTIL" -gt 0 ] 2>/dev/null && [ "$EXUNTIL" -le "$NOW" ] 2>/dev/null; then
   for t in $EXEMPT; do
     if [ "$SUBTYPE" = "$t" ]; then
       case "$MODEL" in
         ''|inherit|*fable*)
-          emit_deny 'モデルポリシー: この subagent_type は fable 例外（fable_exempt_subagent_types）に登録されていますが、例外の有効期限（fable_exempt_until）が切れています。Fable の課金条件（サブスク内か従量課金か）を確認のうえ、継続するならユーザーに model_policy.sh exempt 14（日数指定で期限延長）の実行を依頼してください。今すぐ代替するなら model:"opus" を明示して再実行してください。'
+          emit_deny 'モデルポリシー: この subagent_type は fable 例外（fable_exempt_subagent_types）に登録されていますが、設定された有効期限（fable_exempt_until）が切れています。Fable の課金条件を確認のうえ、継続するならユーザーに model_policy.sh exempt 14（期限延長）または exempt clear（TTL 解除・無期限化）の実行を依頼してください。今すぐ代替するなら model:"opus" を明示して再実行してください。'
           ;;
       esac
     fi
