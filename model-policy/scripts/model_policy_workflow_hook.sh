@@ -52,16 +52,19 @@ elif [ -f "$HOME/.claude/model-policy/policy.json" ]; then
 fi
 
 if [ -n "$POLICY_FILE" ]; then
+  # 1 行 1 フィールド抽出（@tsv の空フィールド畳み込み回避。層1 と同一イディオム）
   PARSED="$(jq -r '
-    [ (.mode // "enforce"),
-      (.default_model // "opus"),
-      ((.allowed // ["opus","sonnet","haiku"]) | join(" ")),
-      (.on_fable // "deny"),
-      (if .deny_fork == null then true else .deny_fork end | tostring),
-      (.relaxed_until // 0)
-    ] | @tsv' "$POLICY_FILE" 2>/dev/null)"
+    (.mode // "enforce"),
+    (.default_model // "opus"),
+    ((.allowed // ["opus","sonnet","haiku"]) | join(" ")),
+    (.on_fable // "deny"),
+    (if .deny_fork == null then true else .deny_fork end | tostring),
+    (.relaxed_until // 0)' "$POLICY_FILE" 2>/dev/null)"
   if [ -n "$PARSED" ]; then
-    IFS=$'\t' read -r p_mode p_defmodel p_allowed p_onfable p_denyfork p_runtil <<EOF
+    {
+      IFS= read -r p_mode; IFS= read -r p_defmodel; IFS= read -r p_allowed
+      IFS= read -r p_onfable; IFS= read -r p_denyfork; IFS= read -r p_runtil
+    } <<EOF
 $PARSED
 EOF
     case "$p_mode"    in enforce|off) MODE="$p_mode";; esac
@@ -108,6 +111,14 @@ case "$SCRIPT" in
     FABLE_MODEL_RE="model[\"'\`]?[[:space:]]*[:=][[:space:]]*[\"'\`][^\"'\`]*fable"
     if printf '%s' "$SCRIPT" | grep -Eiq "$FABLE_MODEL_RE"; then
       emit_deny 'モデルポリシー: Workflow script の agent() で model 値に fable が指定されています。サブエージェントへの fable 割り当ては禁止です。全 agent() の opts.model を "opus"（探索段は "sonnet" 可）に修正して再実行してください。'
+    fi
+    # (1c) agentType / subagent_type 値に fable 例外エージェント（fable-advisor）→ deny
+    #      fable-advisor はメインループの Agent ツール専用（agent hook の TTL 付き例外で通す）。
+    #      Workflow 発のサブエージェント起動が Agent hook を通るかは [未検証] のため、
+    #      workflow 側では例外を作らず、こちらの入口を明示的に閉じる（fable の裏口防止）。
+    ADVISOR_RE="(agentType|subagent_type)[\"'\`]?[[:space:]]*[:=][[:space:]]*[\"'\`]fable-advisor"
+    if printf '%s' "$SCRIPT" | grep -Eiq "$ADVISOR_RE"; then
+      emit_deny 'モデルポリシー: fable-advisor は Workflow の agent() からは使えません（メインループの Agent ツール専用）。Workflow 内の判断・検証段は opts.model "opus" を使い、fable の助言が必要な論点は Workflow の外でメインループから fable-advisor を呼んでください。'
     fi
     # (2) model の語が一度も無い → deny
     case "$SCRIPT" in

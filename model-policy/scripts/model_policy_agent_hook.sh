@@ -66,7 +66,9 @@ emit_rewrite() {
 
 # --- ポリシー読み取り（インライン展開）----------------------------------------
 # 内蔵デフォルト（ファイル欠損・破損・想定外値のときの安全側の値）
-MODE="enforce"; DEFMODEL="opus"; ALLOWED="opus sonnet haiku"; ON_FABLE="deny"; DENY_FORK="true"; RUNTIL="0"
+# EXEMPT/EXUNTIL: fable 例外（fable_exempt_subagent_types / fable_exempt_until）。
+# 既定は「例外なし・期限 0」＝完全に従来動作（安全側）。
+MODE="enforce"; DEFMODEL="opus"; ALLOWED="opus sonnet haiku"; ON_FABLE="deny"; DENY_FORK="true"; RUNTIL="0"; EXEMPT=""; EXUNTIL="0"
 
 # 解決順: $CWD/.claude/model-policy.json → $HOME/.claude/model-policy/policy.json → 内蔵デフォルト。
 # ファイル間マージはしない＝最初に見つかった 1 ファイルだけを読む（フィールドマージは jq のデフォルトで行う）。
@@ -79,20 +81,27 @@ elif [ -f "$HOME/.claude/model-policy/policy.json" ]; then
 fi
 
 if [ -n "$POLICY_FILE" ]; then
-  # 1 回の jq で全フィールドをタブ区切りで抽出。
+  # 1 回の jq で全フィールドを「1 行 1 フィールド」で抽出し、行単位で読む。
+  # （@tsv + IFS=$'\t' read は連続タブ＝空の中間フィールドを畳み込み、exempt リストが
+  #   空のとき後続フィールドがずれる。改行区切りなら空フィールドも 1 行として残る。）
   # deny_fork は false が正当値なので `// true` は使えない（jq の // は false も空扱い）。
   #   → `if .deny_fork == null then true else .deny_fork end` で欠損/null のときだけ true。
   # 壊れた JSON なら jq が失敗 → PARSED が空 → 内蔵デフォルトを維持（安全側）。
   PARSED="$(jq -r '
-    [ (.mode // "enforce"),
-      (.default_model // "opus"),
-      ((.allowed // ["opus","sonnet","haiku"]) | join(" ")),
-      (.on_fable // "deny"),
-      (if .deny_fork == null then true else .deny_fork end | tostring),
-      (.relaxed_until // 0)
-    ] | @tsv' "$POLICY_FILE" 2>/dev/null)"
+    (.mode // "enforce"),
+    (.default_model // "opus"),
+    ((.allowed // ["opus","sonnet","haiku"]) | join(" ")),
+    (.on_fable // "deny"),
+    (if .deny_fork == null then true else .deny_fork end | tostring),
+    (.relaxed_until // 0),
+    ((.fable_exempt_subagent_types // []) | join(" ")),
+    (.fable_exempt_until // 0)' "$POLICY_FILE" 2>/dev/null)"
   if [ -n "$PARSED" ]; then
-    IFS=$'\t' read -r p_mode p_defmodel p_allowed p_onfable p_denyfork p_runtil <<EOF
+    {
+      IFS= read -r p_mode; IFS= read -r p_defmodel; IFS= read -r p_allowed
+      IFS= read -r p_onfable; IFS= read -r p_denyfork; IFS= read -r p_runtil
+      IFS= read -r p_exempt; IFS= read -r p_exuntil
+    } <<EOF
 $PARSED
 EOF
     # sanitize（想定外値は内蔵デフォルトへ）
@@ -102,6 +111,9 @@ EOF
     case "$p_onfable" in deny|rewrite) ON_FABLE="$p_onfable";; esac
     case "$p_denyfork" in true|false)  DENY_FORK="$p_denyfork";; esac
     case "$p_runtil"  in ''|*[!0-9]*) RUNTIL=0;; *) RUNTIL="$p_runtil";; esac
+    # 例外リストは SUBTYPE（小文字化済み）との完全一致比較のため小文字へ正規化
+    EXEMPT="$(printf '%s' "$p_exempt" | tr '[:upper:]' '[:lower:]')"
+    case "$p_exuntil" in ''|*[!0-9]*) EXUNTIL=0;; *) EXUNTIL="$p_exuntil";; esac
   fi
 fi
 
@@ -130,6 +142,35 @@ SUBTYPE="$(printf '%s' "$INPUT" | jq -r '.tool_input | (.subagent_type // "")' 2
 # --- 4. fork かつ deny_fork → deny --------------------------------------------
 if [ "$SUBTYPE" = "fork" ] && [ "$DENY_FORK" = "true" ]; then
   emit_deny 'モデルポリシー: fork サブエージェントは親（メインループ=fable）のモデルを継承するため禁止です。subagent_type を明示した通常の Agent 呼び出しに model:"opus"（既定）または "sonnet"（調査等の定型作業）を付けて実行してください。fork がどうしても必要な場合は、ユーザーに /model-policy relax の実行を依頼してください。'
+fi
+
+# --- 4b. fable 例外（TTL 内のみ）: 登録済み subagent_type は素通し ---------------
+# fable_exempt_subagent_types に SUBTYPE が完全一致し、かつ now < fable_exempt_until の
+# ときだけ、以降の fable deny / 空 model 書き換えを飛ばして通す（例: fable-advisor）。
+# fork は上の 4 で既に deny 済み（subagent_type="fork" は例外リストに登録しない運用）。
+# TTL は「Fable の課金条件変化（プロモ終了→従量課金化）で例外が黙って実費を生む」事故を
+# 期限切れ→自動 deny で防ぐ安全側フェイル。延長は model_policy.sh exempt <日数>。
+if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ] && [ "$EXUNTIL" -gt "$NOW" ] 2>/dev/null; then
+  for t in $EXEMPT; do
+    [ "$SUBTYPE" = "$t" ] && exit 0
+  done
+fi
+
+# --- 4c. 例外登録済みだが TTL 切れ → 明示 deny（黙って opus に化けさせない）------
+# ここに来るのは 4b を通過しなかった（=TTL 切れ or リスト外）場合。登録済みの
+# subagent_type が fable になるはずの呼び出し（model 空/inherit/fable）は、rewrite で
+# 静かに opus 化すると「advisor のつもりが opus だった」品質事故になるため、理由付きで
+# 拒否して気づかせる。明示的に opus/sonnet を指定した呼び出しは通常フローへ流す。
+if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ]; then
+  for t in $EXEMPT; do
+    if [ "$SUBTYPE" = "$t" ]; then
+      case "$MODEL" in
+        ''|inherit|*fable*)
+          emit_deny 'モデルポリシー: この subagent_type は fable 例外（fable_exempt_subagent_types）に登録されていますが、例外の有効期限（fable_exempt_until）が切れています。Fable の課金条件（サブスク内か従量課金か）を確認のうえ、継続するならユーザーに model_policy.sh exempt 14（日数指定で期限延長）の実行を依頼してください。今すぐ代替するなら model:"opus" を明示して再実行してください。'
+          ;;
+      esac
+    fi
+  done
 fi
 
 # --- 5. MODEL に fable を含む → on_fable に従う（deny / rewrite）---------------
