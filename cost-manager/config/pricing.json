@@ -1,10 +1,11 @@
 {
-  "as_of": "2026-07-13",
+  "as_of": "2026-07-18",
   "unit": "usd_per_mtok",
   "stale_after_days": 90,
   "cache_multipliers": { "write_5m": 1.25, "write_1h": 2.0, "read": 0.1 },
   "models": {
-    "claude-fable-5":   { "input": 10, "output": 50, "billing": "payg" },
+    "claude-fable-5":   { "input": 10, "output": 50, "billing": "included",
+                          "_billing_note": "2026-07-18: サブスク内利用継続の決定を反映して payg→included。公式記事上のプロモ終了日（2026-07-19 PT）以降に従量課金化が確認されたら payg へ戻すこと（model-policy の fable 例外 TTL と合わせて見直す）" },
     "claude-opus-4-8":  { "input": 5,  "output": 25, "billing": "included" },
     "claude-sonnet-5":  { "input": 3,  "output": 15, "billing": "included",
                           "intro": { "input": 2, "output": 10, "until": "2026-08-31" } },
