@@ -12,7 +12,7 @@
 #                   （Fable トライアル終了タイミングはユーザーが決めるため）。
 #
 # 配備内容:
-#   - ~/.claude/agents/{verifier,implementer}.md          ← agents/ からコピー
+#   - ~/.claude/agents/{verifier,implementer,fable-advisor}.md ← agents/ からコピー
 #   - ~/.claude/workflows/{implement-verified,deep-review}.js ← workflows/ からコピー
 #   - ~/.claude/settings.json の hooks に3エントリを追加（PostToolUse x2, Stop, UserPromptSubmit。
 #     command はこのリポジトリ内の hooks/*.sh への絶対パス。コピーではなく参照）
@@ -125,6 +125,7 @@ echo
 mkdir -p "$STAGE_DIR/agents" "$STAGE_DIR/workflows"
 cp "$AGENTS_SRC_DIR/verifier.md" "$STAGE_DIR/agents/verifier.md" || die "ステージングに失敗: agents/verifier.md"
 cp "$AGENTS_SRC_DIR/implementer.md" "$STAGE_DIR/agents/implementer.md" || die "ステージングに失敗: agents/implementer.md"
+cp "$AGENTS_SRC_DIR/fable-advisor.md" "$STAGE_DIR/agents/fable-advisor.md" || die "ステージングに失敗: agents/fable-advisor.md"
 cp "$WORKFLOWS_SRC_DIR/implement-verified.js" "$STAGE_DIR/workflows/implement-verified.js" || die "ステージングに失敗: workflows/implement-verified.js"
 cp "$WORKFLOWS_SRC_DIR/deep-review.js" "$STAGE_DIR/workflows/deep-review.js" || die "ステージングに失敗: workflows/deep-review.js"
 
@@ -204,6 +205,7 @@ echo "########## 変更差分プレビュー ##########"
 echo
 diff_file "agents/verifier.md" "$AGENTS_DEST_DIR/verifier.md" "$STAGE_DIR/agents/verifier.md"
 diff_file "agents/implementer.md" "$AGENTS_DEST_DIR/implementer.md" "$STAGE_DIR/agents/implementer.md"
+diff_file "agents/fable-advisor.md" "$AGENTS_DEST_DIR/fable-advisor.md" "$STAGE_DIR/agents/fable-advisor.md"
 diff_file "workflows/implement-verified.js" "$WORKFLOWS_DEST_DIR/implement-verified.js" "$STAGE_DIR/workflows/implement-verified.js"
 diff_file "workflows/deep-review.js" "$WORKFLOWS_DEST_DIR/deep-review.js" "$STAGE_DIR/workflows/deep-review.js"
 diff_file "settings.json" "$SETTINGS_FILE" "$STAGE_DIR/settings.json"
@@ -251,6 +253,7 @@ backup_if_exists "$SETTINGS_FILE" "settings.json"
 backup_if_exists "$CLAUDE_MD_FILE" "CLAUDE.md"
 backup_if_exists "$AGENTS_DEST_DIR/verifier.md" "agents/verifier.md"
 backup_if_exists "$AGENTS_DEST_DIR/implementer.md" "agents/implementer.md"
+backup_if_exists "$AGENTS_DEST_DIR/fable-advisor.md" "agents/fable-advisor.md"
 backup_if_exists "$WORKFLOWS_DEST_DIR/implement-verified.js" "workflows/implement-verified.js"
 backup_if_exists "$WORKFLOWS_DEST_DIR/deep-review.js" "workflows/deep-review.js"
 backup_if_exists "$GATE_STATE_FILE" "completion-gate/state.json"
@@ -262,9 +265,10 @@ mkdir -p "$GATE_DIR" || die "作成できませんでした: $GATE_DIR"
 
 cp "$STAGE_DIR/agents/verifier.md" "$AGENTS_DEST_DIR/verifier.md" || die "配備に失敗: agents/verifier.md"
 cp "$STAGE_DIR/agents/implementer.md" "$AGENTS_DEST_DIR/implementer.md" || die "配備に失敗: agents/implementer.md"
+cp "$STAGE_DIR/agents/fable-advisor.md" "$AGENTS_DEST_DIR/fable-advisor.md" || die "配備に失敗: agents/fable-advisor.md"
 cp "$STAGE_DIR/workflows/implement-verified.js" "$WORKFLOWS_DEST_DIR/implement-verified.js" || die "配備に失敗: workflows/implement-verified.js"
 cp "$STAGE_DIR/workflows/deep-review.js" "$WORKFLOWS_DEST_DIR/deep-review.js" || die "配備に失敗: workflows/deep-review.js"
-echo "配備しました: agents/{verifier,implementer}.md, workflows/{implement-verified,deep-review}.js"
+echo "配備しました: agents/{verifier,implementer,fable-advisor}.md, workflows/{implement-verified,deep-review}.js"
 
 # settings.json / CLAUDE.md はアトミックに置換（同一ディレクトリへ書いてから mv）
 cp "$STAGE_DIR/settings.json" "$SETTINGS_FILE.tmp.$$" || die "settings.json の書き込みに失敗しました。"
