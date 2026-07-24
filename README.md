@@ -28,6 +28,7 @@ private（`plans/` や社内向けスキルを含むため公開しない方針�
 |---|---|---|
 | [`claude-file-paste`](claude-file-paste/) | VSCode 拡張。Mac のクリップボードにある画像やファイルを、Remote-SSH 接続中のターミナルへ**リモート側のファイルパスとして貼り付ける**（リモートの `/tmp/claude_paste/` へ自動転送）。Claude Code CLI に画像を渡す用途を想定。 | 下記 `install.sh` の対象外。**Mac ローカル側の VS Code に入れる**（リモート側に入れると動かない）。手順は [`claude-file-paste/README.md`](claude-file-paste/README.md) を参照。 |
 | [`harness-fablize`](harness-fablize/) | Claude Opus をメインループで **Fable ライクに運用するためのハーネス**。①曖昧・少ない指示からの自律思考 ②敵対的レビュー含むマルチエージェント展開の自発性 ③未検証のままの完了宣言の防止 の3ギャップを、hooks / CLAUDE.md 規範 / agents・workflows の3層で埋める。判断の要所だけ Fable 5 に相談する読み取り専用の `fable-advisor` agent を同梱（model-policy 併用時は例外登録が必要）。 | 下記 `install.sh` の対象外。同梱の専用インストーラ `harness-fablize/install.sh`（`--dry-run` 既定 / `--apply`）で導入する。詳細は [`harness-fablize/README.md`](harness-fablize/README.md)、撤去は同梱の `UNINSTALL.md` を参照。 |
+| [`license-switch`](license-switch/) | **案件ディレクトリごとに Claude Code のライセンスを自動切替**する（メインの `/login` は Max のまま、提携先の Team/Enterprise シートや仕事用サブスクの setup-token・提携先 API キーを direnv + macOS Keychain で配下だけに適用）。認証優先順位（env > `/login` 保存分）を利用し、利用枠・課金はアクティブな資格情報側に帰属。secret は Keychain のみに置き、`.envrc` には取り出しコマンドだけを生成する。アクティブなアカウント/ライセンスを statusline 末尾に常時表示する合成 wrapper（handoff statusline 無改変）も同梱。 | 下記 `install.sh` の対象外。リポジトリのスクリプトを直接叩く（macOS + direnv 前提）。手順は [`license-switch/README.md`](license-switch/README.md) を参照。 |
 
 ---
 
