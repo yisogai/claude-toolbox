@@ -7,7 +7,7 @@
 #   --dry-run       既定。実際には何も変更せず、変更差分のプレビューだけを表示する。
 #   --apply         実際に適用する。適用前に対象ファイルを
 #                   $HOME/.claude/backup-opus-fable-harness-<timestamp>/ へバックアップする。
-#   --switch-model  $HOME/.claude/settings.json の "model" を claude-opus-4-8[1m] に変更する。
+#   --switch-model  $HOME/.claude/settings.json の "model" を opus に変更する。
 #                   明示しない限り model フィールドには一切触れない
 #                   （Fable トライアル終了タイミングはユーザーが決めるため）。
 #
@@ -45,7 +45,7 @@ usage() {
 
   --dry-run       既定。変更差分のプレビューのみ（実変更なし）。
   --apply         実際に ~/.claude へ適用する（適用前にバックアップを取る）。
-  --switch-model  settings.json の model を claude-opus-4-8[1m] に変更する
+  --switch-model  settings.json の model を opus に変更する
                    （--apply と併用したときのみ実際に書き込まれる）。
   -h, --help      このヘルプを表示する。
 EOF
@@ -158,7 +158,7 @@ NEW_SETTINGS="$(jq --argjson entries "$ENTRIES_JSON" '
 [ -n "$NEW_SETTINGS" ] || die "settings.json のマージに失敗しました（jq）。"
 
 if [ "$SWITCH_MODEL" -eq 1 ]; then
-  NEW_SETTINGS="$(printf '%s' "$NEW_SETTINGS" | jq '.model = "claude-opus-4-8[1m]"')"
+  NEW_SETTINGS="$(printf '%s' "$NEW_SETTINGS" | jq '.model = "opus"')"
   [ -n "$NEW_SETTINGS" ] || die "model フィールドの書き換えに失敗しました（jq）。"
 fi
 
@@ -221,7 +221,7 @@ echo
 
 echo "--- model フィールド ---"
 if [ "$SWITCH_MODEL" -eq 1 ]; then
-  echo "変更する: claude-opus-4-8[1m] へ切り替え"
+  echo "変更する: opus へ切り替え"
 else
   echo "変更しない（--switch-model 未指定）"
 fi

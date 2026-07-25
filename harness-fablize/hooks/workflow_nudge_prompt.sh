@@ -3,7 +3,7 @@
 #
 # 目的:
 #   ユーザーのプロンプトが「実装系」かつ一定以上の長さのときだけ、
-#   ミニ仕様→実装→検証→(複数ファイル変更時は verifier サブエージェント) という
+#   ミニ仕様→実装→検証 という
 #   手順を1行だけ additionalContext として注入する。該当しない場合は無出力
 #   （トークンゼロ原則。~/.claude/skills/model-policy/scripts/model_policy_reminder_hook.sh
 #   と同じ思想）。
@@ -45,7 +45,7 @@ case "$LEN" in ''|*[!0-9]*) exit 0 ;; esac
 printf '%s' "$PROMPT" | grep -Eiq \
   '実装|追加|修正|直して|作って|リファクタ|implement|fix|add|refactor' 2>/dev/null || exit 0
 
-MSG='実装タスクの手順リマインダ: 着手前にミニ仕様（目的/範囲/非目標/完了条件）を書く。完了宣言前に検証を実行し、複数ファイル変更時は verifier サブエージェントを通す。'
+MSG='実装タスクの手順リマインダ: 着手前にミニ仕様（目的/範囲/非目標/完了条件）を書く。完了宣言前に検証を実行する。'
 OUT="$(jq -cn --arg m "$MSG" \
   '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$m}}' 2>/dev/null)"
 [ -z "$OUT" ] && exit 0

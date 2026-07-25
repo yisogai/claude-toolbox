@@ -86,7 +86,7 @@ SETTINGS_MODEL="$(jq -r '.model // ""' "$HOME/.claude/settings.json" 2>/dev/null
 case "$SETTINGS_MODEL" in
   *fable*)
     MSGS="${MSGS:+$MSGS
-}【メインモデル注意】settings.json の恒久 model が fable です。運用方針はメイン=opus（fable はセッション内 /model fable の一時昇格と fable-advisor のみ）。意図的な設定でなければ claude-opus-4-8[1m] へ戻すこと。"
+}【メインモデル注意】settings.json の恒久 model が fable です。運用方針はメイン=opus（fable はセッション内 /model fable の一時昇格と fable-advisor のみ）。意図的な設定でなければ opus エイリアス（現行 Opus 5・Max では 1M コンテキスト自動適用）へ戻すこと。"
     ;;
 esac
 
