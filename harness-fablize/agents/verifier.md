@@ -2,6 +2,7 @@
 name: verifier
 description: 反証指向レビューエージェント。「この実装はどこかが壊れている」という仮説から出発し、テスト実行・実コード実行・grepでの実在確認などの外部シグナルで反証を試みる。ユーザーから明示的にレビューを依頼されたとき、または自分の検証だけでは反証しきれないと判断したときに使う。
 model: opus
+effort: high
 tools: Read, Grep, Glob, Bash
 ---
 

@@ -45,7 +45,7 @@ case "$LEN" in ''|*[!0-9]*) exit 0 ;; esac
 printf '%s' "$PROMPT" | grep -Eiq \
   '実装|追加|修正|直して|作って|リファクタ|implement|fix|add|refactor' 2>/dev/null || exit 0
 
-MSG='実装タスクの手順リマインダ: 着手前にミニ仕様（目的/範囲/非目標/完了条件）を書く。完了宣言前に検証を実行する。'
+MSG='実装タスクの手順リマインダ: ツール実行より先に、この発話への返答（回答、または受け止めと進め方）を本文で書く。着手前にミニ仕様（目的/範囲/非目標/完了条件）を書く。完了宣言前に検証を実行する。'
 OUT="$(jq -cn --arg m "$MSG" \
   '{hookSpecificOutput:{hookEventName:"UserPromptSubmit",additionalContext:$m}}' 2>/dev/null)"
 [ -z "$OUT" ] && exit 0
