@@ -1,5 +1,37 @@
 # Changelog
 
+## v2026.07.27 — effort 割当の明示化
+
+前版で agent frontmatter に導入した effort 割当を、「検証は生成以上の effort」という原則で
+統一し、Workflow の各段にも明示した。セッション既定を上げる運用（medium→xhigh）に合わせた
+変更で、既定を上げるだけだと effort 未指定のサブエージェントが全部それを継承してしまうため、
+「割当を明示する」変更とセットで入れている。
+
+### harness-fablize
+
+**agents**
+- verifier: `effort: high` → `effort: xhigh`（implementer は `medium` のまま据え置き）
+
+**workflows**
+- deep-review / implement-verified の全 `agent()` 呼び出しに `opts.effort` を明示
+  （fan-out・実装=medium / spec・synthesize=high / verify・judge=xhigh）。`meta.phases` の
+  表示にも effort を併記し、進捗表示から実際の割当が読めるようにした
+
+### effort の挙動メモ（実測、2026-07-27）
+
+セッション既定を xhigh にした状態で各エージェントに `echo $CLAUDE_EFFORT` を実行させて確認
+（transcript の `effort` フィールドとも一致）。ハーネスを使う側が踏みやすい点を残しておく。
+
+- **frontmatter の effort はセッション既定に勝つ**（既定 xhigh でも implementer は medium のまま）
+- **frontmatter を持たない組み込み agent（Explore / Plan / general-purpose 等）はセッション既定を
+  継承する**。下げる手段がないため、セッション既定を上げるとそれらの探索コストがそのまま上がる
+- **agent 定義はセッション起動時に読まれる**。frontmatter の変更が効くのは次のセッションから
+  （`settings.json` の `effortLevel` も「新セッションの既定」で、現行セッションへは `/effort`）
+- 環境変数 `CLAUDE_CODE_EFFORT_LEVEL` は frontmatter より強く、恒久設定すると割当が全て潰れる
+
+注意: effort を上げることが品質向上につながるかは未確認。内部評価ではむしろ medium が同等以上
+（品質同等・コスト約半分）という観測があり（n=3）、この版の xhigh 化は測定より先に適用している。
+
 ## v2026.07.26 — Opus 5 世代対応
 
 Opus 5（2026-07-24 リリース）の公式移行ガイドと、Claude Code の lean system prompt 化
