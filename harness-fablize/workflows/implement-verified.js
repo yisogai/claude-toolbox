@@ -2,10 +2,10 @@ export const meta = {
   name: 'implement-verified',
   description: 'ミニ仕様生成 → 実装 → 反証検証 → 修正ループを一気通貫で回す対話用ワークフロー。曖昧な依頼を渡すと、目的/範囲/非目標/完了条件を自分で仕様化してから実装し、verifier 相当の反証レビューを通してから結果を返す。',
   phases: [
-    { title: 'Spec', detail: 'ミニ仕様(目的/範囲/非目標/検証可能な完了条件)を生成し、曖昧さを解決するかユーザーへの確認事項を切り出す', model: 'opus' },
-    { title: 'Implement', detail: '仕様が明確な場合に実装し、テストを実行してから結果を返す', model: 'sonnet' },
-    { title: 'Verify', detail: '反証指向レビュー(テスト実行必須)。承認されるまで1〜2ラウンド', model: 'opus' },
-    { title: 'Fix', detail: '要修正判定のときのみ、指摘に対応して再実装。最大2周', model: 'sonnet' },
+    { title: 'Spec', detail: 'ミニ仕様(目的/範囲/非目標/検証可能な完了条件)を生成し、曖昧さを解決するかユーザーへの確認事項を切り出す', model: 'opus (effort: high)' },
+    { title: 'Implement', detail: '仕様が明確な場合に実装し、テストを実行してから結果を返す', model: 'sonnet (effort: medium)' },
+    { title: 'Verify', detail: '反証指向レビュー(テスト実行必須)。承認されるまで1〜2ラウンド', model: 'opus (effort: xhigh)' },
+    { title: 'Fix', detail: '要修正判定のときのみ、指摘に対応して再実装。最大2周', model: 'sonnet (effort: medium)' },
   ],
 }
 
@@ -116,7 +116,7 @@ const spec = await agent(
   '- 未検証で進める前提は unverified_assumptions に列挙する。\n' +
   '- 依頼が実装可能な範囲を明らかに超える、または安全性/破壊的操作に関わり独断で進めるべきでない場合のみ ambiguity_level=needs_user_input とし、open_questions を書く。\n\n' +
   '構造化出力のみで答えること。',
-  { label: 'spec', phase: 'Spec', schema: SPEC_SCHEMA, model: 'opus' }
+  { label: 'spec', phase: 'Spec', schema: SPEC_SCHEMA, model: 'opus', effort: 'high' }
 )
 
 if (!spec) {
@@ -150,7 +150,7 @@ const specBlock =
 phase('Implement')
 let implementation = await agent(
   specBlock + '\n上記のミニ仕様どおりに実装せよ。範囲外の変更はしない。完了条件それぞれを実際に検証してから結果を返すこと。構造化出力のみ。',
-  { label: 'implement', phase: 'Implement', schema: IMPLEMENT_SCHEMA, model: 'sonnet', agentType: 'implementer' }
+  { label: 'implement', phase: 'Implement', schema: IMPLEMENT_SCHEMA, model: 'sonnet', effort: 'medium', agentType: 'implementer' }
 )
 
 if (!implementation) {
@@ -181,6 +181,7 @@ while (true) {
       phase: 'Verify',
       schema: VERIFY_SCHEMA,
       model: 'opus',
+      effort: 'xhigh',
       agentType: 'verifier',
     }
   )
@@ -208,7 +209,7 @@ while (true) {
       '\n## 直前の実装結果\n' + JSON.stringify(implementation, null, 2) +
       '\n\n## verifier からの指摘 (修正ラウンド ' + fixRound + '/' + MAX_FIX_ROUNDS + ')\n' + findingsBlock +
       '\n\n上記の指摘に対応せよ。範囲外の変更はしない。対応後、完了条件と指摘の両方を実際に検証してから結果を返すこと。構造化出力のみ。',
-    { label: 'fix:' + fixRound, phase: 'Fix', schema: IMPLEMENT_SCHEMA, model: 'sonnet', agentType: 'implementer' }
+    { label: 'fix:' + fixRound, phase: 'Fix', schema: IMPLEMENT_SCHEMA, model: 'sonnet', effort: 'medium', agentType: 'implementer' }
   )
   if (!implementation) {
     return {

@@ -2,9 +2,9 @@ export const meta = {
   name: 'deep-review',
   description: '多視点(正しさ/エッジケース/回帰)の並列レビュー → 各指摘の敵対的検証 → 統合を行う対話用ワークフロー。実装完了後にまとめてレビューしたいときに使う。',
   phases: [
-    { title: 'Review', detail: '正しさ/エッジケース/回帰の3レンズで並列レビュー', model: 'sonnet' },
-    { title: 'Verify', detail: '各指摘を敵対的に検証(独立なのでparallelで同時実行)。反証できなければ確定', model: 'opus' },
-    { title: 'Synthesize', detail: '確定した指摘を統合し、重複排除・優先順位付けして最終判定', model: 'opus' },
+    { title: 'Review', detail: '正しさ/エッジケース/回帰の3レンズで並列レビュー', model: 'sonnet (effort: medium)' },
+    { title: 'Verify', detail: '各指摘を敵対的に検証(独立なのでparallelで同時実行)。反証できなければ確定', model: 'opus (effort: xhigh)' },
+    { title: 'Synthesize', detail: '確定した指摘を統合し、重複排除・優先順位付けして最終判定', model: 'opus (effort: high)' },
   ],
 }
 
@@ -115,7 +115,7 @@ log('3レンズ並列レビュー開始: ' + LENSES.map((l) => l.label).join(' /
 
 const reviews = await parallel(
   LENSES.map((lens) => () =>
-    agent(lens.prompt, { label: 'review:' + lens.key, phase: 'Review', schema: FINDINGS_SCHEMA, model: 'sonnet' })
+    agent(lens.prompt, { label: 'review:' + lens.key, phase: 'Review', schema: FINDINGS_SCHEMA, model: 'sonnet', effort: 'medium' })
       .then((r) => {
         log(lens.label + ': ' + (r ? (r.findings || []).length : 0) + ' 件')
         return r
@@ -160,6 +160,7 @@ const verified = await parallel(
         phase: 'Verify',
         schema: VERDICT_SCHEMA,
         model: 'opus',
+        effort: 'xhigh',
       }
     ).then((v) => ({ ...finding, verdict: v }))
   )
@@ -203,7 +204,7 @@ const synthesis = await agent(
     '3. overall_verdict を決める: critical/high が1件でもあれば changes_required、medium以下のみなら changes_recommended、' +
     '該当なしなら no_blocking_issues。\n' +
     '4. 3-5文の summary を書く。\n\n構造化出力のみ。',
-  { label: 'synthesize', phase: 'Synthesize', schema: SYNTH_SCHEMA, model: 'opus' }
+  { label: 'synthesize', phase: 'Synthesize', schema: SYNTH_SCHEMA, model: 'opus', effort: 'high' }
 )
 
 if (!synthesis) {
