@@ -151,8 +151,21 @@ render_condition() {
 }
 
 sizeof_file() {
-  # macOS / BSD stat
-  stat -f%z "$1" 2>/dev/null || wc -c < "$1"
+  # stat の形式は環境で異なる（BSD/macOS は -f、GNU/uutils は -c）。「A || B」で繋がないのは、
+  # uutils coreutils の stat が BSD 形式 -f に対してファイルシステム情報を stdout へ出して
+  # exit 1 するため、出力が連結されて数値でなくなるから（completion_gate_stop.sh と同じ事情）。
+  local _s
+  _s="$(stat -c %s "$1" 2>/dev/null)"          # GNU / uutils
+  case "$_s" in ''|*[!0-9]*) _s="" ;; esac
+  if [[ -z "$_s" ]]; then
+    _s="$(stat -f%z "$1" 2>/dev/null)"         # BSD / macOS
+    case "$_s" in ''|*[!0-9]*) _s="" ;; esac
+  fi
+  if [[ -z "$_s" ]]; then
+    _s="$(wc -c < "$1" 2>/dev/null | tr -d '[:space:]')"
+    case "$_s" in ''|*[!0-9]*) _s=0 ;; esac
+  fi
+  printf '%s' "$_s"
 }
 
 OUTCOME=0

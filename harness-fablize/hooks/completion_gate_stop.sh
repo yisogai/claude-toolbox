@@ -88,7 +88,22 @@ BLOCKS_FILE="$GATE_DIR/blocks-$SID"
 # ので武装しない。
 [ -f "$CODE_EDIT_FILE" ] || exit 0
 
-CODE_MTIME="$(stat -f %m "$CODE_EDIT_FILE" 2>/dev/null || stat -c %Y "$CODE_EDIT_FILE" 2>/dev/null)"
+# mtime 取得は「A || B」で繋がない。uutils coreutils（新しめの WSL/Ubuntu 既定）の
+# stat は BSD 形式 `-f` に対してファイルシステム情報を stdout へ出して exit 1 するため、
+# `stat -f %m ... || stat -c %Y ...` だと両方の stdout が連結され、数値チェックに
+# 引っかかって常に fail-open（block しない）になる。各形式を個別に試し、数値になった
+# ものだけを採用する。
+mtime_of() {
+  _m="$(stat -c %Y "$1" 2>/dev/null)"          # GNU / uutils
+  case "$_m" in ''|*[!0-9]*) _m="" ;; esac
+  if [ -z "$_m" ]; then
+    _m="$(stat -f %m "$1" 2>/dev/null)"        # BSD / macOS
+    case "$_m" in ''|*[!0-9]*) _m="" ;; esac
+  fi
+  printf '%s' "$_m"
+}
+
+CODE_MTIME="$(mtime_of "$CODE_EDIT_FILE")"
 case "$CODE_MTIME" in ''|*[!0-9]*) exit 0 ;; esac
 
 # 台帳の全行を走査し、kind=="test" のエントリのうち最新の ts を求める。
