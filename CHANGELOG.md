@@ -1,5 +1,28 @@
 # Changelog
 
+## v2026.07.28 — Linux（uutils coreutils）環境での completion_gate 修正
+
+WSL2 + uutils coreutils の環境で completion_gate が「ブロックすべき場面でブロックしない」
+（fail-open）状態になっていた不具合の修正。macOS では顕在化しない環境依存の問題。
+
+### harness-fablize
+
+**hooks/completion_gate_stop.sh**
+- mtime 取得を `stat -f %m … || stat -c %Y …` の連結から、形式ごとに個別実行して数値に
+  なったものだけを採用する方式へ変更。uutils の `stat` は BSD 形式 `-f` を「ファイルシステム
+  情報の表示」と解釈し、その出力を **stdout** に出したうえで exit 1 するため、`A || B` では
+  両方の stdout が同じコマンド置換に入り、mtime が複数行の非数値になって数値ガードで
+  素通し（fail-open）になっていた。GNU coreutils は `-f` のエラーを stderr に出すため、
+  この壊れ方は uutils 環境でのみ発生する
+
+**vision/render.sh**
+- `sizeof_file()` も同じ書き方だったため同方式（`-c %s` → `-f%z` → `wc -c`）に統一。
+  サイズが非数値になると `[[ "$size" -gt 0 ]]` が算術エラーで失敗し、描画完了を検出できない
+  まま watchdog が Chrome を強制終了する経路があった
+
+検証: macOS（BSD stat）と WSL2（uutils stat）の双方で `tests/canary.sh` が PASS=20 FAIL=0
+（修正前の uutils 環境は PASS=17 FAIL=3）。
+
 ## v2026.07.27 — effort 割当の明示化
 
 前版で agent frontmatter に導入した effort 割当を、「検証は生成以上の effort」という原則で
