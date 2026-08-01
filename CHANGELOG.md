@@ -1,5 +1,38 @@
 # Changelog
 
+## v2026.08.01 — 運用転換: harness-fablize 凍結・model-policy の Fable メイン対応
+
+作者環境がメインループを Opus から Fable 5 へ移行したことに伴う反映。
+
+### harness-fablize（凍結）
+
+- README 冒頭に凍結バナーを追加（Opus メイン運用時代のアーカイブ。Opus メイン環境向けの
+  参考実装として残置）。凍結の根拠: (1) Claude 5 世代の公式プロンプトガイダンス
+  「旧モデル向けの過剰な指示・検証強制は品質を下げる」 (2) 完了ゲートの実運用監査で
+  4日間のブロック26件中88%が誤爆と確認（主因: scratchpad の一時スクリプトを拡張子だけで
+  製品コードと誤判定／RSpec 系コマンドが検証パターン未対応）。真陽性は3件のみだった。
+- 検証台帳に「テスト基盤を探すだけのコマンド（`find -name "pytest.ini"` 等）を部分文字列
+  マッチで検証行為と誤記録する」偽陽性の欠陥があることを監査で確認（未修正のまま凍結。
+  再有効化する場合はパターン照合を先頭トークン基準に改修すること）。
+- `install.sh --switch-model` を方向引数化（`--switch-model[=opus|fable]`、値省略は
+  従来どおり opus）。Fable メイン機で再インストールすると model が黙って opus に戻る
+  事故の防止。
+- `UNINSTALL.md`: agents 削除コマンドへの fable-advisor 追加・model 書き戻しコマンド例の
+  追加・「別系統の配線（model-policy スキル等）は本手順の範囲外」節の追加・settings.json
+  の hooks 削除 jq を「同居 hook を巻き添えにしない」安全版に差し替え。
+- 作業プロトコル（claude-md）: 「応答の書き方」を 5→3 行に圧縮（Fable/Opus 混在運用に
+  合わせたモデル非依存の最小規範化）。
+
+### model-policy
+
+- fable-advisor 例外運用の廃止（2026-07-31）を README / SKILL.md / スクリプトの
+  コメント・案内文に反映。`fable_exempt_subagent_types` 機構はコードとして残るが未使用。
+- CLAUDE.md 貼付テンプレを新運用（メイン=Fable が実質作業も行う・サブは opus 既定 +
+  effort でコスト制御・sonnet は大量 fan-out 限定。Sonnet 消費も共通週次枠に計上される
+  実測 2026-08-01 に基づく）へ更新。
+- reminder hook のメインモデル・ドリフト警告を反転（旧: model が fable なら警告 → 新:
+  fable / opus 以外の恒久設定のみ警告）。
+
 ## v2026.07.28 — Linux（uutils coreutils）環境での completion_gate 修正
 
 WSL2 + uutils coreutils の環境で completion_gate が「ブロックすべき場面でブロックしない」

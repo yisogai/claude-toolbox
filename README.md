@@ -14,7 +14,7 @@ private（`plans/` や社内向けスキルを含むため公開しない方針�
 
 | スキル | 概要 | 同梱物 |
 |---|---|---|
-| [`model-policy`](model-policy/) | サブエージェント（Agent ツール / Workflow の `agent()`）への **fable 割り当てをハーネスレベルで禁止**し、作業を opus / sonnet に振り分けて委譲することでコストを制御する。fable=統括専任、作業は opus 既定・安全カテゴリ（調査・明確な仕様の実装・テスト・大量読み等）は sonnet。fable/fork 禁止は PreToolUse hook で強制し、モデルの振り分けは CLAUDE.md 規範で担保する。登録済みサブエージェント（例: harness-fablize の `fable-advisor`）だけを**例外許可**する `fable_exempt_subagent_types` を備える（既定は無期限。任意で TTL を設定でき、その場合は期限切れで自動的に deny へ戻る）。 | PreToolUse / UserPromptSubmit hook 3本＋運用 CLI＋導入ドキュメント |
+| [`model-policy`](model-policy/) | サブエージェント（Agent ツール / Workflow の `agent()`）への **fable 割り当てをハーネスレベルで禁止**し、作業を opus（既定）へ振り分けてコストを制御する。コストの主制御は effort（探索=low/medium／検証=xhigh）で行い、sonnet は大量 fan-out 等の量的な段に限定して使う。fable/fork 禁止は PreToolUse hook で強制し、モデルの振り分けは CLAUDE.md 規範で担保する。特定サブエージェントの例外許可機構 `fable_exempt_subagent_types` はコードとして残るが現在未使用（旧 fable-advisor 運用は 2026-07-31 廃止）。 | PreToolUse / UserPromptSubmit hook 3本＋運用 CLI＋導入ドキュメント |
 | [`handoff`](handoff/) | `/compact` の**直前に引き継ぎファイルを生成**し、compact 後に無劣化で復元する。要約器が読めないファイルへ全文を保存し、`/compact` 引数にはパス参照だけを渡す方式。SessionStart(compact) hook による自動注入と statusline / 閾値通知を同梱。 | hook（compact 自動注入・閾値通知）・statusline・保存 CLI |
 | [`cost-manager`](cost-manager/) | Claude Code の transcript からタスク単位のコスト（USD + 参考JPY、モデル別内訳）を集計する。開始マーカーで計測範囲を区切り、完了時に Markdown + PNG カードのレポートを同一形式で出力する。予算マーカー・ETA・requestId dedup に対応。 | 計測・レポート生成スクリプト（cost_start / cost_status / cost_report ほか）＋Markdown / PNG テンプレート＋設定（単価・為替） |
 
@@ -27,7 +27,7 @@ private（`plans/` や社内向けスキルを含むため公開しない方針�
 | ツール | 概要 | 導入 |
 |---|---|---|
 | [`claude-file-paste`](claude-file-paste/) | VSCode 拡張。Mac のクリップボードにある画像やファイルを、Remote-SSH 接続中のターミナルへ**リモート側のファイルパスとして貼り付ける**（リモートの `/tmp/claude_paste/` へ自動転送）。Claude Code CLI に画像を渡す用途を想定。 | 下記 `install.sh` の対象外。**Mac ローカル側の VS Code に入れる**（リモート側に入れると動かない）。手順は [`claude-file-paste/README.md`](claude-file-paste/README.md) を参照。 |
-| [`harness-fablize`](harness-fablize/) | Claude Opus をメインループで **Fable ライクに運用するためのハーネス**。①曖昧・少ない指示からの自律思考 ②敵対的レビュー含むマルチエージェント展開の自発性 ③未検証のままの完了宣言の防止 の3ギャップを、hooks / CLAUDE.md 規範 / agents・workflows の3層で埋める。判断の要所だけ Fable 5 に相談する読み取り専用の `fable-advisor` agent を同梱（model-policy 併用時は例外登録が必要）。 | 下記 `install.sh` の対象外。同梱の専用インストーラ `harness-fablize/install.sh`（`--dry-run` 既定 / `--apply`）で導入する。詳細は [`harness-fablize/README.md`](harness-fablize/README.md)、撤去は同梱の `UNINSTALL.md` を参照。 |
+| [`harness-fablize`](harness-fablize/) | **凍結（2026-08-01）: Opus メイン運用時代のアーカイブ**。Claude Opus をメインループで Fable ライクに運用するためのハーネス（①曖昧指示からの自律思考 ②マルチエージェント展開の自発性 ③未検証完了の防止、を hooks / CLAUDE.md 規範 / agents・workflows の3層で補う）。作者環境は Fable 5 メインへ移行し運用を停止したが、Opus メインの環境向け参考実装として残置。凍結の経緯と注意は README 冒頭を参照。 | 下記 `install.sh` の対象外。同梱の専用インストーラ `harness-fablize/install.sh`（`--dry-run` 既定 / `--apply`）で導入する。詳細は [`harness-fablize/README.md`](harness-fablize/README.md)、撤去は同梱の `UNINSTALL.md` を参照。 |
 | [`license-switch`](license-switch/) | **案件ディレクトリごとに Claude Code のライセンスを自動切替**する（メインの `/login` は Max のまま、提携先の Team/Enterprise シートや仕事用サブスクの setup-token・提携先 API キーを direnv + macOS Keychain で配下だけに適用）。認証優先順位（env > `/login` 保存分）を利用し、利用枠・課金はアクティブな資格情報側に帰属。secret は Keychain のみに置き、`.envrc` には取り出しコマンドだけを生成する。アクティブなアカウント/ライセンスを statusline 末尾に常時表示する合成 wrapper（handoff statusline 無改変）も同梱。 | 下記 `install.sh` の対象外。リポジトリのスクリプトを直接叩く（macOS + direnv 前提）。手順は [`license-switch/README.md`](license-switch/README.md) を参照。 |
 
 ---
