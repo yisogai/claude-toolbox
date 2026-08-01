@@ -41,21 +41,32 @@ SWITCH_MODEL=0
 
 usage() {
   cat <<'EOF'
-使い方: install.sh [--dry-run|--apply] [--switch-model] [-h|--help]
+使い方: install.sh [--dry-run|--apply] [--switch-model[=opus|fable]] [-h|--help]
 
   --dry-run       既定。変更差分のプレビューのみ（実変更なし）。
   --apply         実際に ~/.claude へ適用する（適用前にバックアップを取る）。
-  --switch-model  settings.json の model を opus に変更する
-                   （--apply と併用したときのみ実際に書き込まれる）。
+  --switch-model[=opus|fable]
+                  settings.json の model をエイリアス（opus / fable）に変更する。
+                  値省略時は opus（後方互換）。--apply と併用したときのみ実際に
+                  書き込まれる。2026-08-01 に方向を引数化: 値なし --switch-model の
+                  再実行で Fable メイン環境の model が黙って opus に戻る事故を防ぐため、
+                  Fable メイン機では明示的に --switch-model=fable を使うこと。
   -h, --help      このヘルプを表示する。
 EOF
 }
 
+SWITCH_TARGET="opus"
 for arg in "$@"; do
   case "$arg" in
     --dry-run) MODE="dry-run" ;;
     --apply) MODE="apply" ;;
     --switch-model) SWITCH_MODEL=1 ;;
+    --switch-model=opus) SWITCH_MODEL=1; SWITCH_TARGET="opus" ;;
+    --switch-model=fable) SWITCH_MODEL=1; SWITCH_TARGET="fable" ;;
+    --switch-model=*)
+      echo "エラー: --switch-model の値は opus か fable のみです: $arg" >&2
+      exit 1
+      ;;
     -h|--help) usage; exit 0 ;;
     *)
       echo "エラー: 不明なオプション: $arg" >&2
@@ -158,7 +169,7 @@ NEW_SETTINGS="$(jq --argjson entries "$ENTRIES_JSON" '
 [ -n "$NEW_SETTINGS" ] || die "settings.json のマージに失敗しました（jq）。"
 
 if [ "$SWITCH_MODEL" -eq 1 ]; then
-  NEW_SETTINGS="$(printf '%s' "$NEW_SETTINGS" | jq '.model = "opus"')"
+  NEW_SETTINGS="$(printf '%s' "$NEW_SETTINGS" | jq --arg m "$SWITCH_TARGET" '.model = $m')"
   [ -n "$NEW_SETTINGS" ] || die "model フィールドの書き換えに失敗しました（jq）。"
 fi
 
@@ -221,7 +232,7 @@ echo
 
 echo "--- model フィールド ---"
 if [ "$SWITCH_MODEL" -eq 1 ]; then
-  echo "変更する: opus へ切り替え"
+  echo "変更する: $SWITCH_TARGET へ切り替え"
 else
   echo "変更しない（--switch-model 未指定）"
 fi
