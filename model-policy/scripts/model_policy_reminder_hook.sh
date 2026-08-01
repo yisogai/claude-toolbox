@@ -79,14 +79,16 @@ if [ "$STATE" = "relaxed" ]; then
   MSGS="【モデルポリシー緩和中】サブエージェントのモデル強制が緩和されています（残り約 ${REMAIN} 分、${UNTIL_H} まで）。緩和が不要になったら /model-policy reset で即時 enforce に戻すこと。"
 fi
 
-# (2) メインモデル・ドリフト計器: 恒久設定（settings.json の model）が fable のままなら警告。
-#     Opus メイン運用への移行後、/model や設定編集で fable が恒久化されたら毎プロンプトで
-#     気づかせる（セッション内の一時昇格 /model fable は settings.json に残らない想定）。
+# (2) メインモデル・ドリフト計器: 恒久設定（settings.json の model）が想定外なら警告。
+#     Fable メイン運用（2026-07-31〜）では fable（週次枠50%まで）が正、opus（枠消化後の代替）も正。
+#     それ以外（sonnet/haiku 等）が恒久化されていたら毎プロンプトで気づかせる。
+#     未設定（空）はエイリアス既定に任せる扱いとして警告しない。
 SETTINGS_MODEL="$(jq -r '.model // ""' "$HOME/.claude/settings.json" 2>/dev/null | tr '[:upper:]' '[:lower:]')"
 case "$SETTINGS_MODEL" in
-  *fable*)
+  *fable*|*opus*|"") : ;;
+  *)
     MSGS="${MSGS:+$MSGS
-}【メインモデル注意】settings.json の恒久 model が fable です。運用方針はメイン=opus（fable はセッション内 /model fable の一時昇格と fable-advisor のみ）。意図的な設定でなければ opus エイリアス（現行 Opus 5・Max では 1M コンテキスト自動適用）へ戻すこと。"
+}【メインモデル注意】settings.json の恒久 model が ${SETTINGS_MODEL} です。運用方針はメイン=fable（週次枠50%まで。枠消化後は opus）。意図的な設定でなければ fable へ戻すこと。"
     ;;
 esac
 

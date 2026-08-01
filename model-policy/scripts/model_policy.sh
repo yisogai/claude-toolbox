@@ -8,10 +8,12 @@
 #   reset           relaxed_until=null（即 enforce 復帰）。
 #   off             mode="off"（キルスイッチ）。
 #   enforce         mode="enforce" かつ relaxed_until=null。
-#   exempt [日数]   fable 例外（fable_exempt_subagent_types）に任意の TTL を設定
-#                   （now+日数、既定14・1〜90にクランプ。期限切れ後は deny）。
-#   exempt clear    TTL を解除して無期限に戻す（既定状態。登録済み例外は常時有効）。
-#   exempt disable  例外リストを空にして fable 例外を完全停止。
+#   exempt ...      fable 例外（fable_exempt_subagent_types）の操作。
+#                   **advisor 廃止済み（2026-07-31）・現在未使用**（例外リストは空＝fable は
+#                   常に deny）。通常は使用しない。サブコマンドは機構として残す:
+#                     exempt [日数]  任意の TTL を設定（now+日数、既定14・1〜90にクランプ）。
+#                     exempt clear   TTL を解除して無期限に戻す。
+#                     exempt disable 例外リストを空にして fable 例外を完全停止。
 #                   例外リストへの登録は policy.json を直接編集する（README §7-4）。
 #   --project <sub> 対象を cwd の ./.claude/model-policy.json に切替（タスク/プロジェクト単位スコープ）。
 #
@@ -250,7 +252,7 @@ case "$SUBCMD" in
             echo "fable 例外に TTL を設定しました（${DAYS} 日後に失効→deny。解除は exempt clear。対象: ${SCOPE_LABEL}）。"
             # リストが空だと TTL だけあっても例外は成立しない。気づけるように注意を出す。
             n="$(jq -r '(.fable_exempt_subagent_types // []) | length' "$POLICY_FILE" 2>/dev/null)"
-            case "$n" in ''|0) echo "注意: fable_exempt_subagent_types が空です。例外を有効にするには policy.json にサブエージェント名（例: \"fable-advisor\"）を登録してください（README §7-4）。";; esac
+            case "$n" in ''|0) echo "注意: fable_exempt_subagent_types が空です（advisor 廃止済み・現在の想定状態）。例外はこのまま無効のままで構いません。どうしても必要な場合のみ policy.json にサブエージェント名を登録してください（README §7-4）。";; esac
             ;;
         esac
         ;;

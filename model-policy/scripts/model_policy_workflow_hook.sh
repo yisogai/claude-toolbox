@@ -112,13 +112,12 @@ case "$SCRIPT" in
     if printf '%s' "$SCRIPT" | grep -Eiq "$FABLE_MODEL_RE"; then
       emit_deny 'モデルポリシー: Workflow script の agent() で model 値に fable が指定されています。サブエージェントへの fable 割り当ては禁止です。全 agent() の opts.model を "opus"（探索段は "sonnet" 可）に修正して再実行してください。'
     fi
-    # (1c) agentType / subagent_type 値に fable 例外エージェント（fable-advisor）→ deny
-    #      fable-advisor はメインループの Agent ツール専用（agent hook の TTL 付き例外で通す）。
-    #      Workflow 発のサブエージェント起動が Agent hook を通るかは [未検証] のため、
-    #      workflow 側では例外を作らず、こちらの入口を明示的に閉じる（fable の裏口防止）。
+    # (1c) agentType / subagent_type 値に fable 例外エージェント名（fable-advisor）→ deny
+    #      fable-advisor は 2026-07-31 に廃止済み（agent hook 側の例外リストも空）。
+    #      この分岐は fable の裏口を塞ぐ残置ガードとして維持する（旧名を名乗る script を拒否）。
     ADVISOR_RE="(agentType|subagent_type)[\"'\`]?[[:space:]]*[:=][[:space:]]*[\"'\`]fable-advisor"
     if printf '%s' "$SCRIPT" | grep -Eiq "$ADVISOR_RE"; then
-      emit_deny 'モデルポリシー: fable-advisor は Workflow の agent() からは使えません（メインループの Agent ツール専用）。Workflow 内の判断・検証段は opts.model "opus" を使い、fable の助言が必要な論点は Workflow の外でメインループから fable-advisor を呼んでください。'
+      emit_deny 'モデルポリシー: fable は Workflow の agent() では使えません（fable-advisor は 2026-07-31 に廃止済み）。判断・検証段は opts.model "opus" を使ってください。'
     fi
     # (2) model の語が一度も無い → deny
     case "$SCRIPT" in

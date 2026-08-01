@@ -1,6 +1,6 @@
 # model-policy — サブエージェント・モデル使用ポリシー強制システム
 
-メインループを高単価モデル（Fable 5）で運用しつつ、**サブエージェント（Agent ツール / Workflow の agent()）が誤って Fable で起動すること**を Claude Code のハーネスレベルで防ぐ仕組み。Fable を「計画・設計・統括」専任にし、作業を opus / sonnet に振り分けて委譲する（既定は opus、調査・明確な仕様の実装・テスト・大量読みなど安全カテゴリは sonnet）ことでコストを下げる。手動サフィックス「サブエージェントは opus を使用して」を不要にする。
+メインループを高単価モデル（Fable 5）で運用しつつ、**サブエージェント（Agent ツール / Workflow の agent()）が誤って Fable で起動すること**を Claude Code のハーネスレベルで防ぐ仕組み。メインは統括に加えて実質作業も行ってよく、委譲するサブエージェントは opus 既定（コストは effort で制御。sonnet は大量 fan-out・大量読みなど量的な段に限定）。fable の週次利用枠をサブエージェントの誤起動で消費しないことが主目的で、手動サフィックス「サブエージェントは opus を使用して」を不要にする。
 
 この `skills/model-policy/` ディレクトリは**自己完結**しており、ディレクトリを `~/.claude/skills/` にコピーし、本 README の手順で `settings.json` / `CLAUDE.md` / `.gitignore` に追記するだけで導入できる。
 
@@ -12,8 +12,8 @@
 
 | 層 | 実体 | 役割 | 種別 |
 |---|---|---|---|
-| 1 | `scripts/model_policy_agent_hook.sh`（PreToolUse `Agent\|Task`） | fork→deny / fable→deny / 未指定・inherit→`updatedInput` で opus に書き換え / allowed は素通し / **fable 例外（`fable_exempt_subagent_types`、TTL 内のみ）は素通し** | **強制** |
-| 1b | `scripts/model_policy_workflow_hook.sh`（PreToolUse `Workflow`） | script に `agent(` があり `model` 語が一度も無い→deny / `model` 値に `fable`→deny / `agentType`/`subagent_type` 値に `fable-advisor`→deny（例外エージェントはメインの Agent ツール専用） | **強制** |
+| 1 | `scripts/model_policy_agent_hook.sh`（PreToolUse `Agent\|Task`） | fork→deny / **fable→常に deny**（`fable_exempt_subagent_types` の例外リストは現在空） / 未指定・inherit→`updatedInput` で opus に書き換え / allowed は素通し | **強制** |
+| 1b | `scripts/model_policy_workflow_hook.sh`（PreToolUse `Workflow`） | script に `agent(` があり `model` 語が一度も無い→deny / `model` 値に `fable`→deny（例外なし） | **強制** |
 | 2 | `~/.claude/CLAUDE.md` への追記 | fable=統括専任・作業を opus/sonnet に振り分けて委譲・agent() は model 明示・fork 禁止 | 規範（システムコンテキスト常駐で compact 後も残る） |
 | 3 | `scripts/model_policy.sh`（`/model-policy` スキル） | `status/relax/reset/off/enforce` の運用 CLI | 運用 |
 | 4 | `scripts/model_policy_reminder_hook.sh`（UserPromptSubmit） | 緩和中／恒久 model=fable／fable 例外の失効48時間前（TTL 設定時）のときだけ注入（平常時は無出力=トークンゼロ） | 可視化 |
@@ -40,8 +40,7 @@
 ```
 - `mode`: `enforce` | `off`（off=キルスイッチ）。`relaxed` という mode は作らない。
 - `relaxed_until`: `null` または未来の epoch 秒（整数）。
-- `fable_exempt_subagent_types`: fable 割当を許可する subagent_type の**完全一致**リスト（小文字。例: `["fable-advisor"]`）。既定 `[]`=例外なし。**agent hook（層1）のみ有効で、Workflow（層1b）には例外を作らない**（層1b は逆に `fable-advisor` の agentType 指定を deny して裏口を閉じる）。
-- `fable_exempt_until`: 例外の**任意 TTL**（epoch 秒）。`null`/未設定（**既定**）= 無期限で有効。数値を設定した場合のみ期限付きになり、期限切れは**明示 deny**（黙って opus に化けない）。Fable のサブスク恒久包含（2026-07-20〜 Max/Team Premium、リミットの50%まで。公式 X 2026-07-18 確認）を前提に既定無効。従量課金へ方針転換されたら `exempt <日数>` で時限運用へ、完全停止は `exempt disable`。
+- `fable_exempt_subagent_types` / `fable_exempt_until`: **未使用（advisor 廃止に伴い 2026-07-31 凍結）**。fable 割当を例外的に許可する機構だが、現在は例外リストが空＝fable は常に deny。機構自体はコードとして残っている（詳細は §7-4）。
 - 解決順: `$CWD/.claude/model-policy.json`（プロジェクト単位の上書き）→ `~/.claude/model-policy/policy.json`（ユーザー）→ hook 内蔵デフォルト。**最初に見つかった 1 ファイルだけ**を読む（ファイル間マージはしない）。
 
 ---
@@ -50,7 +49,7 @@
 
 - **jq**（必須）。不在の場合 hook は素通し（フェイルオープン）＝強制が効かない。
 - **macOS**（BSD `date`）。CLI の `relax` は `date -v +${分}M +%s` を使う。**Linux（GNU date）でも動く**ように `date -d "+${分} minutes" +%s` へ自動フォールバックする（`scripts/model_policy.sh` の `future_epoch()`）。
-- **Claude Code バージョン**: 動作確認済みバージョン → **2.1.202**（2026-07-07 検証。実機で確認済み: model 未指定→opus 書き換え〔サブエージェントのモデルID自己申告で `claude-opus-4-8[1m]` を確認〕、fable 指定→deny、fork→deny、relax 中の fable 通過→reset で deny 復帰、Workflow の model 語ゼロ→deny / model 値 fable→deny（2026-07-13 再検証。fable 文字列を含むが model 明示の script は通過）、fable 例外（`fable_exempt_subagent_types`＋任意 TTL、2026-07-18 追加・単体テストで exempt 素通し/期限切れ deny/リスト外 deny の3系を確認。同日、Fable の Max 恒久包含〔7/20〜・リミットの50%〕の公式発表を受けて TTL を既定無効＝null は無期限へ変更））。本システムは以下の文書化仕様に依存する:
+- **Claude Code バージョン**: 動作確認済みバージョン → **2.1.202**（2026-07-07 検証。実機で確認済み: model 未指定→opus 書き換え〔サブエージェントのモデルID自己申告で `claude-opus-4-8[1m]` を確認〕、fable 指定→deny、fork→deny、relax 中の fable 通過→reset で deny 復帰、Workflow の model 語ゼロ→deny / model 値 fable→deny（2026-07-13 再検証。fable 文字列を含むが model 明示の script は通過）、fable 例外（`fable_exempt_subagent_types`＋任意 TTL、2026-07-18 追加・単体テストで exempt 素通し/期限切れ deny/リスト外 deny の3系を確認。同日、Fable の Max 恒久包含〔7/20〜・リミットの50%〕の公式発表を受けて TTL を既定無効＝null は無期限へ変更。**2026-07-31 に fable 例外の運用自体を廃止**〔fable-advisor 廃止・例外リストを空に。以降このテストは非該当〕））。本システムは以下の文書化仕様に依存する:
   - サブエージェント起動ツール名 `Agent`（v2.1.63 で `Task` から改称、`Task` はエイリアス）。matcher は `"Agent|Task"`。
   - PreToolUse hook の `hookSpecificOutput.updatedInput`（入力書き換え）と `permissionDecision:"deny"`＋`permissionDecisionReason`（理由付き拒否）。
   - モデル解決順: env `CLAUDE_CODE_SUBAGENT_MODEL` > per-invocation `model` > agent 定義 frontmatter > **メイン会話モデル継承（=Fable）**。
@@ -102,15 +101,12 @@ touch ~/.claude/model-policy/debug                              # raw tool_input
 ### 3-5. `~/.claude/CLAUDE.md` に行動規範（層2）を追記（全文）
 ```markdown
 ## サブエージェント・モデル方針（model-policy）
-- **fable（メインループ）は統括専任**: 計画・設計・タスク分解・レビュー統合のみ。実装・調査・修正・テスト・大量のファイル読みなどの「作業」は Agent ツールでサブエージェントに委譲する。単発の実装タスクでも委譲する（fable トークンを作業で消費しない）。
-- **サブエージェントの model は必ず明示する**（省略は fable 継承となるため禁止。fable 指定も禁止）。選択は **opus（既定）/ sonnet の2択**:
-  - **sonnet に落とすカテゴリ（限定列挙）**: コードベース調査（Explore）／仕様が明確な単発実装・修正／テスト作成・実行／大量ファイル読み・要約・抽出／ドキュメント下書き／Workflow の探索・fan-out（finder）段。
-  - **上記以外はすべて opus**: レビュー・検証・バグ発見、設計・アーキ判断、曖昧・仕様未確定のタスク、長時間の自律多段実行、セキュリティ、Workflow の verify/judge/synthesize 段。
-- **1行判定（迷ったら opus）**: 「その出力を後段で opus か fable が必ず検証・レビューするか？ Yes → sonnet 可／No（そのまま成果・判断になる）→ opus」。
-- **非対称ガードレール**: 生成は sonnet でも、検証・レビュー・判断は opus 固定。sonnet の生成物は opus か fable のレビューを必ず通す。sonnet が詰まる・失敗する・仕様の曖昧さに当たる・レビュー不合格になったら、同一タスクを opus で1回だけ再委譲（それでも駄目なら fable が介入）。
-- **Workflow / ultracode**: 全 `agent()` 呼び出しに model を明示。探索・finder 段は `'sonnet'`、verify/judge/synthesize 段は `'opus'`。
-- **fork は使わない**（常に親=fable のモデルで動くため）。
-- 例外的に fable のサブエージェントが必要なときだけ、ユーザーに `/model-policy relax [分]` を依頼する（既定60分で自動復帰。`/model-policy reset` で即復帰）。
+- メインループは fable（Max 週次枠の50%まで）。枠の残りに応じて /model opus と使い分ける。メインは統括専任ではなく、調査・実装・レビューなどの実質作業を自分で行ってよい。
+- サブエージェントは fable 禁止（hook 強制。fork も不可）。model と effort を必ず明示し、既定は opus。コストは effort で制御する（探索・要約・明確な単発実装=low/medium ／ レビュー・検証・設計・曖昧タスク=xhigh。検証・判断には生成と同等以上の effort）。
+- sonnet は例外: 10体規模の大量 fan-out・大量ファイル読みなど量で枠を食う段のみ可（枠消費は opus の約6割。実測 2026-08-01: sonnet も共通週次枠に計上）。sonnet の成果は opus かメインで検証する。
+- **Workflow / ultracode**: 全 `agent()` 呼び出しに model と `opts.effort` を明示する（判断・検証・synthesize 段は `'opus'`＋高 effort）。
+- **fork は使わない**（常に親=メインループのモデルで動くため）。
+- fable/fork がどうしても必要な例外時だけ、ユーザーに `/model-policy relax [分]` を依頼する（既定60分で自動復帰。`/model-policy reset` で即復帰）。
 - 上記のうち fable 禁止・fork 禁止・model 未指定→opus 書き換えは PreToolUse hook でも強制される。拒否されたら理由に従い model を修正して再実行すること。
 ```
 
@@ -205,17 +201,10 @@ hook バグで**全サブエージェントが起動不能**になった場合�
 `policy.json` の `"on_fable": "deny"` を `"rewrite"` にすると、fable 指定を deny せず `default_model`（opus）へ**自動書き換え**する（拒否→再試行のラウンドトリップを省ける）。既定は deny（明示的に気づかせるため）。
 
 ### 7-3. 緊急時の単一モデル固定
-§6 の応急処置と同じ。`settings.json` の `env` に `"CLAUDE_CODE_SUBAGENT_MODEL": "opus"`。per-invocation 指定を全上書きするため恒久運用では非推奨（将来の Sonnet 使い分けと **fable-advisor（7-4）を潰す**）。
+§6 の応急処置と同じ。`settings.json` の `env` に `"CLAUDE_CODE_SUBAGENT_MODEL": "opus"`。per-invocation 指定を全上書きするため恒久運用では非推奨（Sonnet の使い分けを潰す）。
 
-### 7-4. 特定サブエージェントに fable を許可（fable-advisor 例外）
-Opus メイン運用で「判断の要所だけ Fable に相談する」ための例外機構。`policy.json` にサブエージェント名を登録するだけで有効になる（**既定は無期限**）:
-```bash
-jq '.fable_exempt_subagent_types = ["fable-advisor"]' ~/.claude/model-policy/policy.json > /tmp/p.json && mv /tmp/p.json ~/.claude/model-policy/policy.json
-```
-- 判定は agent hook の fork チェック直後: `subagent_type` が**完全一致**（かつ TTL 設定時は `now < fable_exempt_until`）のときだけ素通し（fable deny と空 model→opus 書き換えの両方を回避）。fork は引き続き無条件 deny。
-- **任意 TTL**: Fable の課金条件が従量課金へ方針転換された場合に `exempt <日数>` で時限運用に切り替えられる。**期限切れは rewrite ではなく明示 deny**（黙って opus に化けて「advisor のつもりが opus だった」品質事故を防ぐ。理由文に延長・解除手順が入る）。TTL 設定時のみ、期限が残り48時間を切ると層4（reminder hook）が毎プロンプトに失効予告を注入する。
-- **限界（悪用・事故経路）**: `subagent_type` は呼び出し側の自己申告文字列で、hook は `~/.claude/agents/<name>.md` の実在や frontmatter 内容を検証しない。つまり任意のプロンプトが `subagent_type:"fable-advisor"` を名乗れば TTL 内は fable で起動しうる。例外リストは最小限（原則 fable-advisor のみ）に保ち、agent 定義側の tools 制限（読み取り専用）で被害半径を抑える。
-- 実行時に本当に fable で動いたかは agent 定義側の「稼働モデル自己申告」で確認する（rewrite/env による静かな opus 化の検知。導入時カナリアの合格条件は「起動した」ではなく「fable として起動した」）。
+### 7-4. 特定サブエージェントに fable を許可（fable 例外機構）
+**廃止済み（2026-07-31）**: fable-advisor は廃止した。`fable_exempt_subagent_types` / `fable_exempt_until` の機構はコードとしては残っているが**現在未使用**（`policy.json` の例外リストは空＝fable はサブエージェントで常に deny）。関連する CLI（`exempt` サブコマンド）と reminder hook の失効予告も、例外リストが空である限り発火しない。
 
 ---
 

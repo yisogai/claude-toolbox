@@ -145,12 +145,13 @@ if [ "$SUBTYPE" = "fork" ] && [ "$DENY_FORK" = "true" ]; then
 fi
 
 # --- 4b. fable 例外: 登録済み subagent_type は素通し -----------------------------
-# fable_exempt_subagent_types に SUBTYPE が完全一致すれば、以降の fable deny /
-# 空 model 書き換えを飛ばして通す（例: fable-advisor）。fork は上の 4 で既に deny 済み。
+# **廃止済み（2026-07-31）・現在未使用**: fable-advisor の廃止に伴い、例外リスト
+# （fable_exempt_subagent_types）は空で運用する＝この分岐は成立せず fable は常に deny。
+# 機構はコードとして残す（将来 fable が必要な例外を作る場合の入口）。
+# 動作: fable_exempt_subagent_types に SUBTYPE が完全一致すれば、以降の fable deny /
+# 空 model 書き換えを飛ばして通す。fork は上の 4 で既に deny 済み。
 # fable_exempt_until は「任意の TTL」: 0/null（既定）= 無期限で有効。epoch 秒を設定した
 # 場合のみ期限付きになり、期限切れは 4c の明示 deny に倒れる。
-# （Fable は 2026-07-20 以降 Max 恒久包含〔リミットの50%まで〕が公式確認済みのため TTL は
-#   既定無効。従量課金へ方針転換されたら model_policy.sh exempt <日数> で時限運用へ切替。）
 if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ]; then
   if [ "$EXUNTIL" -eq 0 ] 2>/dev/null || [ "$EXUNTIL" -gt "$NOW" ] 2>/dev/null; then
     for t in $EXEMPT; do
@@ -160,7 +161,8 @@ if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ]; then
 fi
 
 # --- 4c. 例外登録済みだが TTL 切れ（TTL 設定時のみ）→ 明示 deny ------------------
-# rewrite で静かに opus 化すると「advisor のつもりが opus だった」品質事故になるため、
+# 4b と同じく現在未使用（例外リストが空のため到達しない）。
+# rewrite で静かに opus 化すると「fable のつもりが opus だった」品質事故になるため、
 # fable になるはずの呼び出し（model 空/inherit/fable）は理由付きで拒否して気づかせる。
 # 明示的に opus/sonnet を指定した呼び出しは通常フローへ流す。
 if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ] && [ "$EXUNTIL" -gt 0 ] 2>/dev/null && [ "$EXUNTIL" -le "$NOW" ] 2>/dev/null; then
@@ -168,7 +170,7 @@ if [ -n "$SUBTYPE" ] && [ -n "$EXEMPT" ] && [ "$EXUNTIL" -gt 0 ] 2>/dev/null && 
     if [ "$SUBTYPE" = "$t" ]; then
       case "$MODEL" in
         ''|inherit|*fable*)
-          emit_deny 'モデルポリシー: この subagent_type は fable 例外（fable_exempt_subagent_types）に登録されていますが、設定された有効期限（fable_exempt_until）が切れています。Fable の課金条件を確認のうえ、継続するならユーザーに model_policy.sh exempt 14（期限延長）または exempt clear（TTL 解除・無期限化）の実行を依頼してください。今すぐ代替するなら model:"opus" を明示して再実行してください。'
+          emit_deny 'モデルポリシー: この subagent_type は fable 例外（fable_exempt_subagent_types）に登録されていますが、設定された有効期限（fable_exempt_until）が切れています。fable 例外は廃止済み・通常は未使用の機構です。model:"opus" を明示して再実行してください（どうしても例外が必要な場合のみ、ユーザーに model_policy.sh exempt clear / exempt [日数] の実行を依頼すること）。'
           ;;
       esac
     fi
