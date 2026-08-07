@@ -101,8 +101,8 @@ touch ~/.claude/model-policy/debug                              # raw tool_input
 ### 3-5. `~/.claude/CLAUDE.md` に行動規範（層2）を追記（全文）
 ```markdown
 ## サブエージェント・モデル方針（model-policy）
-- メインループは fable（Max 週次枠の50%まで）。枠の残りに応じて /model opus と使い分ける。メインは統括専任ではなく、調査・実装・レビューなどの実質作業を自分で行ってよい。
-- サブエージェントは fable 禁止（hook 強制。fork も不可）。model と effort を必ず明示し、既定は opus。コストは effort で制御する（探索・要約・明確な単発実装=low/medium ／ レビュー・検証・設計・曖昧タスク=xhigh。検証・判断には生成と同等以上の effort）。
+- メインループは fable（Max 週次枠の50%まで）。枠の残りに応じて /model opus と使い分ける。メインは統括専任ではなく、調査・実装・レビューなどの実質作業を自分で行ってよい。ただし機械的に完結する作業（明確な単発実装・修正、テスト実行、大量ファイル読み・要約）は opus サブエージェントへ委譲し、fable は判断・設計・レビューの要所と全体統合に温存する。
+- サブエージェントは fable 禁止（hook 強制。fork も不可）。model と effort を必ず明示し、既定は opus。コストは effort で制御する（探索・要約・明確な単発実装=medium ／ レビュー・検証・設計・曖昧タスク=xhigh。effort の下限は medium・low は使わない。検証・判断には生成と同等以上の effort）。
 - sonnet は例外: 10体規模の大量 fan-out・大量ファイル読みなど量で枠を食う段のみ可（枠消費は opus の約6割。実測 2026-08-01: sonnet も共通週次枠に計上）。sonnet の成果は opus かメインで検証する。
 - **Workflow / ultracode**: 全 `agent()` 呼び出しに model と `opts.effort` を明示する（判断・検証・synthesize 段は `'opus'`＋高 effort）。
 - **fork は使わない**（常に親=メインループのモデルで動くため）。
