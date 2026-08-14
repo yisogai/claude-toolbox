@@ -140,4 +140,4 @@ usage-report/
 - `--root ~/Documents/medirom/projects/Lav/git --week this`（2026-W33）: 7 セッション、$460.38（¥73,660）、実処理時間 9時間40分。
 - `sessions_by_model.csv` のモデル別合計は summary.md のモデル別表と一致（自己整合を確認）。
 - 作業内容サマリ（2026-08-14 実測、Lav/git 2026-07 の21セッション）: 第1段のみの実行は 9.6 秒（サマリ追加前 7.1〜8.6 秒に対し +1.5 秒程度）。`--summarize` 初回は 1分52秒（うち `claude -p` haiku が約100秒）、キャッシュヒット時は 11.6 秒で `claude` を呼ばない。`digests.json` は 21 セッションで人間の発話 216 件・ハーネス注入メッセージの混入 0 件。第1段のみ・`--summarize` キャッシュヒットのいずれでも、2回実行で CSV/PNG/digests.json がバイト一致することを確認済み。
-- タイトル判定の広域確認: `--root /Users/isogai --month 2026-08`（71 セッション）で、タイトルが生のハーネス注入タグになるケース 0 件・`(タイトルなし)` 0 件・サブエージェント向け指示文（`[SYSTEM NOTIFICATION …]` / `The coordinator sent a message …` / `[structured-output-enforce] …`）が漏れたケース 0 件。
+- タイトル判定の広域確認: `--root /Users/<YOU> --month 2026-08`（71 セッション）で、タイトルが生のハーネス注入タグになるケース 0 件・`(タイトルなし)` 0 件・サブエージェント向け指示文（`[SYSTEM NOTIFICATION …]` / `The coordinator sent a message …` / `[structured-output-enforce] …`）が漏れたケース 0 件。
