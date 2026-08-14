@@ -1,11 +1,13 @@
 {
-  "as_of": "2026-07-18",
+  "as_of": "2026-08-14",
   "unit": "usd_per_mtok",
   "stale_after_days": 90,
   "cache_multipliers": { "write_5m": 1.25, "write_1h": 2.0, "read": 0.1 },
   "models": {
     "claude-fable-5":   { "input": 10, "output": 50, "billing": "included",
                           "_billing_note": "2026-07-20 以降 Max/Team Premium に恒久包含（週次リミットの50%まで。公式X 2026-07-18 確認）。従量課金へ方針転換されたら payg へ戻し、model-policy の exempt <日数> で TTL 運用に切替えること" },
+    "claude-opus-5":    { "input": 5,  "output": 25, "billing": "included",
+                          "_source": "2026-08-14 確認: 公式モデル一覧（Opus 4.8 据え置きの $5/$25・1M context・long-context 追加料金なし）" },
     "claude-opus-4-8":  { "input": 5,  "output": 25, "billing": "included" },
     "claude-sonnet-5":  { "input": 3,  "output": 15, "billing": "included",
                           "intro": { "input": 2, "output": 10, "until": "2026-08-31" } },
