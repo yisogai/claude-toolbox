@@ -160,12 +160,18 @@ def render_summary_card(
     fig.add_artist(plt.Line2D([0.06, 0.94], [0.44, 0.44], color=GRID, linewidth=1))
 
     fig.text(0.06, 0.385, "高コストセッション Top3", fontsize=12, color=TEXT_SECONDARY, va="center")
-    y = 0.32
+    y = 0.325
     if top_sessions:
-        for title, usd in top_sessions[:3]:
+        # テキストは "タイトル" か "タイトル\n要約"。要約は主行より小さく・淡く出す
+        # （主行を要約で置き換えると 30 字で途中切れになり、タイトルより読めない）。
+        for text, usd in top_sessions[:3]:
+            title, _, sub = (text or "").partition("\n")
             fig.text(0.06, y, _trim(title, 30), fontsize=13, color=TEXT, va="center")
             fig.text(0.94, y, f"${usd:,.2f}", fontsize=13, color=TEXT, va="center", ha="right")
-            y -= 0.08
+            if sub.strip():
+                fig.text(0.06, y - 0.035, _trim(sub.strip(), 46), fontsize=9.5,
+                         color=TEXT_SECONDARY, va="center")
+            y -= 0.085
     else:
         fig.text(0.06, y, "（対象セッションなし）", fontsize=13, color=TEXT_SECONDARY, va="center")
 

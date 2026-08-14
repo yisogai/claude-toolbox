@@ -7,7 +7,6 @@
 
 ## 非目標
 - リアルタイム監視・予算アラート（cost-manager の領分）
-- LLM によるセッション要約生成（タイトルは transcript の `ai-title` 等をそのまま使う）
 - 走査結果のキャッシュ（v2 候補。現状は実測 10 秒程度なので不要）
 
 ## 構成
@@ -21,9 +20,11 @@ usage-report/
 ├── scripts/
 │   ├── usage_report.py # CLI エントリ（argparse + 出力オーケストレーション）
 │   ├── usage_lib.py    # 期間解決・スコープ列挙・帰属・集計・CSV/md 生成
+│   ├── digest.py       # 決定論ダイジェスト抽出（標準ライブラリのみ）
+│   ├── summarize.py    # LLM 要約 + キャッシュ（標準ライブラリのみ）
 │   └── charts.py       # matplotlib 描画（任意依存を隔離）
 ├── reports/.gitkeep
-└── var/.gitkeep      # 枠のみ。現在の実装は var/ に一切書き込まない（未使用）
+└── var/summaries/    # LLM 要約のキャッシュ（git 管理外。第1段だけなら書き込まない）
 ```
 
 ## 処理の流れ
@@ -69,10 +70,32 @@ usage-report/
    - `start_jst` / `end_jst` は**採用行そのものの ts ではなく、同一 dedup キー（requestId）グループの窓内 ts の min/max** から取る（`key_span`）。`Accumulator` が採用するのはグループ中 `output_tokens` 最大の行＝ストリーミング最終行なので、採用行だけ見ると開始が数秒〜1分後ろにずれる。キーは `(dedup キー, session_id)` にして、fork でコピーされた親の行が子の開始時刻を前へ引っ張らないようにする。
    - 実処理時間は `lib.scan_activity` → `lib.active_seconds`（セッション別と、全 tfile をまとめた全体値）。全体は interval union なので並行実行を二重計上しない。`--no-active` でこの走査を丸ごと省く（**同一 `--format` 条件で約1/2**。実測は下記「実測」節）。
 
-5. **出力**
+5. **作業内容サマリ**（`digest.py` / `summarize.py`）
+   - `ai-title` は会話の早い段階で決まり以降ほぼ更新されない（実測: 1セッションで123〜146回記録されるが値はユニーク1〜2種）。Bash 200 回・Edit 50 回規模のセッションではタイトルが実作業を表さないため、**タイトルとは独立に「何をしたか」を出す**。
+   - **第1段（常時・決定論・無料）**: `digest.build_digest` が**メイン jsonl のみ**を1パス走査し、人間の発話（最大40件×300字）・編集ファイル/ディレクトリ・Bash コマンドの分類と代表例・ブランチと切替回数・サブエージェント・スキル・参照 issue/PR・ツール頻度・フェーズを抽出する。窓は集計側と同じ半開区間 `[since, until)`。結果は `digests.json`（`--format` に関係なく常に出力）と `sessions.csv` の `summary` 列・`summary.md` に入る。
+     - 走査は「まず正規表現で `timestamp` / `gitBranch` を拾い、詳細が要る行（`user` か `tool_use` を含む行）だけ `json.loads`」する。全行 `json.loads` はメイン jsonl だけで数百 MB あり実行時間が跳ねる（実測の追加コストは約1.5秒）。
+     - 人間の発話判定は `usage_lib.is_human_utterance`（`cost_lib._is_human_prompt` + `_is_caveat`）に集約し、判定を複製しない。これによりハーネス注入メッセージ（`<task-notification>` 等）が要約の入力に混ざらない（実データ216件で混入0）。
+     - コマンド分類は**先頭トークン基準**。ただし先頭の環境変数代入とラッパー（`env` `sudo` `time` `npx` `fvm` `bundle exec` 等）を読み飛ばし、パスの basename を取る正規化だけ行う。実データは `bin/rspec …` / `TZ=Asia/Tokyo fvm flutter test …` / `RAILS_ENV=… bin/rake …` が大半で、素朴な第1トークン判定では test/build がほぼ 0 件に落ちる（実測で確認）。
+     - **フェーズ分割**は `gitBranch` の変化、または直前レコードとの時刻差が `--phase-gap-min` 分（既定30）以上で区切る。フェーズが1つしかないセッションは `phases` を空にする（要約側の入力を減らすため）。
+     - **エージェント自身の作業メモは `files` / `dirs` から除外**する。件数だけ `agent_files_total` に残す。実測（Lav/git 2026-07）では除外前、21セッション中7件で「主要ディレクトリ」がメモリ / scratchpad になり、LLM に渡す上位10ファイルの45%がこれらだった。tmp 側は `scratchpad` セグメントを必須にして、tmp 配下に置いた作業対象リポジトリを誤除外しない。
+     - 除外の範囲は **`.claude/` 配下のハーネス内部ディレクトリだけ**（`projects` `plans` `todos` `memory` `shell-snapshots` `history` `statsig` `logs` `ide`）。`/.claude/` を含むパスを一律に落とすと、`~/.claude/CLAUDE.md` `~/.claude/skills/**`（設定・スキル整備そのものが作業）や、EnterWorktree の `<repo>/.claude/worktrees/<name>/**` の実ソースまで消える。実測（Lav/git 2026-07）で一律除外にすると除外183件中83件が worktree の実ソースで、3セッションは残ファイル0件になり、`summary` 列が「作業メモ31ファイル」のような事実と異なる表現になっていた。
+     - **worktree のパスは元リポジトリへ正規化**する（`<repo>/.claude/worktrees/<name>/x` → `<repo>/x`）。同じファイルの編集が worktree ごとに別ディレクトリへ散らばるのを防ぎ、`dirs` 集計を実リポジトリの構造に一致させる。
+     - **ヒアドキュメント本文はコマンドとして数えない**。`_CMD_SPLIT_RE` は改行でも分割するため、`git commit -F - <<'EOF' … EOF` の本文の各行が1コマンド扱いになり、本文中の `flutter test` 等で test 回数が水増しされていた。分類前に `strip_heredocs` で本文（開始行の次〜終端タグ行）を落とす。
+   - **第2段（`--summarize` でオプトイン）**: `summarize.summarize` が未キャッシュ分をまとめて `claude -p --model <model> --output-format text` に渡す。`claude -p` は1回あたり17〜26秒の起動オーバーヘッドがあり、セッションごとに逐次呼ぶと非現実的（21セッションで9分）。`stdin=subprocess.DEVNULL` を付けないと stdin 待ちで数秒無駄になる。出力は ```` ```json ```` フェンスで包まれることがあるため、フェンス剥がし → `json.loads` → 「最初の `{` から最後の `}`」フォールバックの順で解釈する。
+     - **バッチ分割**: 1回の呼び出しは最大15セッション / 300KB（argv 長と応答 JSON が途中で切れるリスクの両方を抑える）。これを超える規模は**発話を削らずに複数回**呼ぶ（実測: 133セッションで6回）。以前は発話件数を 20→8→3→0 と落としていたが、`--root ~/Documents --month 2026-07` では pmax=0（発話ゼロ）が採用され、材料が無警告で消えていた。1セッション単体が1バッチに収まらない場合だけ発話件数を落とし、そのときは警告を1件積む。
+     - **プロンプトに対象期間を明記**する（`対象期間: since 〜 until（JST・終端は含まない）`）。入れないと総括がフェーズの時刻から期間を推測し、月次レポートを「2週間」と誤記する（実測）。各セッションの `稼働時刻` も渡す。
+     - **多フェーズは主要フェーズだけ渡す**（`select_phases`、最大12件。活動量順に採り時系列に戻す決定論選択）。全件渡しても返るのは数行で、入力だけ膨らむため。summary.md 側は「ダイジェスト N 件 → 要約 M 件」と対応を明示する。
+     - **材料に無い固有名詞を禁じる**（`PROMPT_VERSION` 3 で追加）。「推測で埋めない」だけでは足りず、モデルは文脈から技術名を補完する。実測（Lav/git 2026-07・haiku・21セッション）で、要約中の英字トークンがダイジェスト本文に出現するかを機械検査したところ、禁止前は 3/21 件が裏付けの無い語を含んでいた（Android のテストという材料だけから `RxJava`、`アプリ側` から `iOS`/`Flutter`、`Rails 7.2` から `LTS`）。ライブラリ・フレームワーク・プラットフォーム・製品・バージョン番号を材料外で書かないよう明示したところ **0/21 件**になり、平均文字数は 70→52 字に縮んだが具体性は落ちていない（削れたのは捏造部分で、実在の対象はむしろ細かくなった）。
+     - **LLM 出力の型は容器から検査する**（`_phases_from`）。`phases` が数値・真偽値・文字列単体・辞書で返っても落ちず、1文字ずつ分解もしない。加えて `usage_report.py` 側で要約処理全体を `except Exception` で受け、決定論ダイジェストに縮退する（型検査の網羅に頼らない二重化）。`subprocess.run` は `errors="replace"` を付ける（不正 UTF-8 の stdout で `UnicodeDecodeError` が出るとレポートが1件も出せなくなるため）。
+   - **縮退**: `claude` 不在（`shutil.which`）・非ゼロ終了・タイムアウト（既定300秒）・パース失敗・スキーマ不一致は、すべて**警告を1件積んで要約なしで続行**する（exit 0 を維持）。個々のセッションが応答から欠けた場合も、そのセッションだけ要約なしにして全体は捨てない。
+   - **キャッシュ**: `var/summaries/<key[:2]>/<key>.json`。キーは `session_id + メイン jsonl の mtime_ns/size + 期間の since/until + モデル + PROMPT_VERSION + ダイジェスト本文のハッシュ + 発話件数上限` の SHA-256。ダイジェスト本文を含めるのは、`--phase-gap-min` を変えると LLM への入力（フェーズ分割）が変わるのに mtime/size は変わらず、古い要約が黙って再利用されるため。transcript が伸びれば自然に無効化される。総括は全セッションキーから別キーで持つ。全件ヒットなら `claude` を呼ばない（実測: 初回112秒 → キャッシュヒット11.6秒）。プロンプトを変えたら `PROMPT_VERSION` を上げる。
+
+6. **出力**
    - CSV は `csv.writer`（CRLF）で組み立て、utf-8-sig にエンコードして `lib.atomic_write_bytes`。
    - PNG は `savefig` → BytesIO → ヘッダ検査（`png_size`）→ `lib.atomic_write_bytes`。
-   - summary.md は `lib.atomic_write_text`。
+   - summary.md / digests.json は `lib.atomic_write_text`。
+   - `summary.md` のセッション一覧は**表ではなくリスト**にしている。各セッションの下に要約行、多フェーズならさらにネストしたフェーズ内訳を置くため（Markdown の表は行間に子行を置けない）。数値（開始時刻・実処理・コスト）は各項目の第1子行に残す。
+   - `summary_card.png` の Top3 は**タイトルを主行**に出し、`--summarize` の LLM 要約があるときだけ副行（小さめ・淡色）で要約を添える（`charts.render_summary_card` のシグネチャは変えず、`"タイトル\n要約"` の1文字列を渡す）。要約でタイトルを置き換えると 30 字幅で途中切れになり、タイトルより読めなくなる（決定論要約は「主要ディレクトリ + 件数」なので特に情報量が落ちる）。決定論要約は `sessions.csv` / `summary.md` で読ませる。
    - **警告（`Agg.warnings`）と注記（`Agg.notes`）は別物として持ち、別の面に出す**。警告は異常・要注意（未収載モデル・fork/resume の帰属・timestamp 欠落行・単価改定日またぎ・root 外 cwd・孤児 subagent・pricing stale）、注記は「異常ではないが前提として知っておくべきこと」。summary.md では `## 警告` と `## 注記`、stdout では `警告:` と `注記:` に分ける。毎回出る文を警告に混ぜると本物の警告が薄まるため。
    - `## 注記` には、常時出る「表中の $ は小数2桁に丸めているため内訳の足し上げが合計と数セントずれる」に加え、`Agg.notes` の各行（現在は as_of の件）を並べる。stdout 側は `Agg.notes` のみ（丸めの文は md 固有）。
 
@@ -102,9 +125,12 @@ usage-report/
 - `sessions.csv` の行順は「明細行 → `# 注記` 行（1〜3本）→ `TOTAL`」。`TOTAL` を文字どおり最終行に置くことで `tail -1` で合計が取れる（注記行を最後に置くと、機械的に合計を拾う経路が壊れる）。
 - レポート生成コマンド自身の消費は集計スナップショット確定後に発生するため含まれない。
 - `message.usage.iterations` を見ていない（トップレベル `usage` のみで集計する cost_lib の方針に合わせている）。7月分 Lav/git で `iterations` を持つ行は窓内に 22,964 行あるが、うち `iterations` の合計がトップレベル `usage` を上回る（＝過小計上になる）のは **1 行・約 $0.53** だけで、全体の 0.02%（多イテレーションの行は 0 件）。将来モデルが多イテレーション化すると乖離が広がりうる。
-- `ai-title` は**期間スコープを持たない**（transcript の最終行の `aiTitle` を採る）。長期セッションを期間で切って集計すると、その期間の作業とは別テーマのタイトルが出ることがある。
+- `ai-title` は**期間スコープを持たない**（transcript の最終行の `aiTitle` を採る）。長期セッションを期間で切って集計すると、その期間の作業とは別テーマのタイトルが出ることがある。作業内容サマリ（`digests.json` / `summary` 列 / `--summarize`）は窓内のレコードだけから作るため、この制約を受けない。
+- `--summarize` は人間の発話（各250字）と Bash コマンド例を**外部モデル（`claude -p`）へ無加工で送る**。秘匿情報を含む発話・コマンドがあればそのまま送信され、`digests.json` と `var/summaries/` にも平文で残る。レポートを他人に渡す前に中身を確認する。
+- LLM 要約は**初回生成時だけ非決定的**（キャッシュヒット時はバイト一致）。要約の内容は `claude -p` のモデル出力そのもので、検証していない主張が混じりうる。数値・事実は CSV / `digests.json` を正とする。
+- 要約はメイン jsonl のみを材料にするため、サブエージェント側でしか行われていない作業（メイン側に tool_use の痕跡が残らないもの）は要約に現れない。
 - 定期実行（cron）セッションのタイトルは `(定期実行) <タスク名>` になるため、同一タスクの複数回実行は一覧上で同じタイトルに見える（`session_id` と開始日時で区別する）。
-- `var/` は現在の実装からは**未使用**（`.gitkeep` のみ。実行時状態を持たないため書込先は `reports/` か `--out-dir` だけ）。
+- `var/summaries/` は LLM 要約のキャッシュ専用（`--summarize` 時のみ書き込む）。第1段だけの実行では書込先は `reports/` か `--out-dir` だけ。
 
 ## 実測（2026-08-14）
 - `--root ~/Documents/medirom/projects/Lav/git --month 2026-07`: 対象 1,733 ファイル / 431 MB、21 セッション、dedup 後 19,920 行、合計 $2,282.76（¥365,241）、実処理時間 41時間15分。単価未収載モデルは 0 件（`claude-opus-5` 追記後）。
@@ -113,4 +139,5 @@ usage-report/
   - モデル別: claude-fable-5 $1,244.74 / claude-opus-4-8 $616.33 / claude-sonnet-5 $234.06 / claude-opus-5 $187.62。
 - `--root ~/Documents/medirom/projects/Lav/git --week this`（2026-W33）: 7 セッション、$460.38（¥73,660）、実処理時間 9時間40分。
 - `sessions_by_model.csv` のモデル別合計は summary.md のモデル別表と一致（自己整合を確認）。
+- 作業内容サマリ（2026-08-14 実測、Lav/git 2026-07 の21セッション）: 第1段のみの実行は 9.6 秒（サマリ追加前 7.1〜8.6 秒に対し +1.5 秒程度）。`--summarize` 初回は 1分52秒（うち `claude -p` haiku が約100秒）、キャッシュヒット時は 11.6 秒で `claude` を呼ばない。`digests.json` は 21 セッションで人間の発話 216 件・ハーネス注入メッセージの混入 0 件。第1段のみ・`--summarize` キャッシュヒットのいずれでも、2回実行で CSV/PNG/digests.json がバイト一致することを確認済み。
 - タイトル判定の広域確認: `--root /Users/isogai --month 2026-08`（71 セッション）で、タイトルが生のハーネス注入タグになるケース 0 件・`(タイトルなし)` 0 件・サブエージェント向け指示文（`[SYSTEM NOTIFICATION …]` / `The coordinator sent a message …` / `[structured-output-enforce] …`）が漏れたケース 0 件。

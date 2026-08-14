@@ -8,7 +8,7 @@
 - コスト計算・dedup・実処理時間の中核は cost-manager の cost_lib を import 再利用する
   （ロジックを複製しない）。ここに書くのは「スコープ列挙・帰属・期間窓・出力整形」だけ。
 - ``~/.claude/projects`` は読み取り専用。書込は usage-report/reports/（または
-  ``--out-dir`` で明示された出力先）のみ。``var/`` は現状使っていない。
+  ``--out-dir`` で明示された出力先）と、LLM 要約のキャッシュ ``var/summaries/`` のみ。
 - 時刻は内部 UTC aware、表示は JST（``lib.JST``）。
 """
 
@@ -482,6 +482,25 @@ def _is_caveat(text: str) -> bool:
     return bool(_HARNESS_TAG_RE.match(text)) or text.startswith(_CAVEAT_PREFIXES)
 
 
+def is_human_utterance(obj: dict, text: Optional[str]) -> bool:
+    """レコードとその本文が「人間が書いた発話」かどうか（要約入力の採否判定）。
+
+    判定は既存ロジックの再利用に徹する（複製しない）:
+    - 非発話行（isMeta / isSidechain / tool_result / スラッシュコマンド展開）は
+      ``cost_lib._is_human_prompt``
+    - ハーネス注入メッセージ（``<task-notification>`` 等）は ``_is_caveat``
+
+    digest.py から呼ぶ。private 関数が将来消えても走査が止まらないよう getattr で退避。
+    """
+    t = (text or "").strip()
+    if not t:
+        return False
+    is_human_fn = getattr(lib, "_is_human_prompt", None)
+    if callable(is_human_fn) and not is_human_fn(obj):
+        return False
+    return not _is_caveat(t)
+
+
 def _harness_derived_title(text: str) -> Optional[str]:
     """注入メッセージのうち、内容を表すものからタイトルを作れる場合だけ作る。"""
     m = _SCHEDULED_TASK_RE.match(text)
@@ -903,6 +922,17 @@ def _fmt_hm(seconds: float) -> str:
     return f"{total_min // 60}:{total_min % 60:02d}"
 
 
+def _csv_safe(text: str) -> str:
+    """表計算ソフトが数式として評価するセル（CSV インジェクション）を無害化する。
+
+    タイトルも要約も transcript の内容（＝人が書いた文字列や LLM 出力）に由来するため、
+    ``=HYPERLINK(...)`` のような文字列が入りうる。Excel / Numbers はセル先頭の
+    ``= + - @`` を数式の開始と見るので、先頭に ``'`` を足して文字列に固定する。
+    """
+    t = text or ""
+    return "'" + t if t[:1] in ("=", "+", "-", "@") else t
+
+
 def _jst_str(dt: Optional[datetime]) -> str:
     return lib.to_jst(dt).strftime("%Y-%m-%d %H:%M") if dt else ""
 
@@ -916,14 +946,30 @@ def _tokens_of(rep) -> tuple:
     return i, w5, w1, r, o
 
 
-def build_sessions_csv(agg: Aggregation, with_active: bool) -> str:
+def summary_of(summaries: Optional[dict], sid: str) -> str:
+    """要約テキスト（無ければ空文字）。``summaries`` は {sid: {"summary": str, ...}}。"""
+    if not summaries:
+        return ""
+    e = summaries.get(sid) or {}
+    return (e.get("summary") or "").replace("\n", " ").strip()
+
+
+def phases_of(summaries: Optional[dict], sid: str) -> list:
+    if not summaries:
+        return []
+    e = summaries.get(sid) or {}
+    out = e.get("phases") or []
+    return [str(x).replace("\n", " ").strip() for x in out if str(x).strip()]
+
+
+def build_sessions_csv(agg: Aggregation, with_active: bool, summaries: Optional[dict] = None) -> str:
     buf = io.StringIO(newline="")
     w = csv.writer(buf, lineterminator="\r\n")
     w.writerow([
         "session_id", "repo", "title", "first_cwd", "start_jst", "end_jst",
         "active_time", "api_calls", "input_tokens", "cache_write_5m",
         "cache_write_1h", "cache_read", "output_tokens", "total_tokens",
-        "cost_usd", "cost_jpy", "unknown_tokens", "models",
+        "cost_usd", "cost_jpy", "unknown_tokens", "models", "summary",
     ])
     for s in agg.sessions:
         i, w5, w1, r, o = _tokens_of(s.report)
@@ -933,12 +979,14 @@ def build_sessions_csv(agg: Aggregation, with_active: bool) -> str:
             (m.resolved or m.model) + ("" if m.known else "*") for m in s.report.models
         }))
         w.writerow([
-            s.session_id, repo_of(s, agg.root), s.title or "(タイトルなし)", s.first_cwd,
+            s.session_id, repo_of(s, agg.root),
+            _csv_safe(s.title or "(タイトルなし)"), s.first_cwd,
             _jst_str(s.start_utc), _jst_str(s.end_utc),
             _fmt_hm(s.active_sec) if with_active else "",
             len(s.rows), i, w5, w1, r, o, total,
             f"{s.report.total_usd:.4f}", int(round(s.report.total_jpy)),
             unknown_tokens(s.report), models,
+            _csv_safe(summary_of(summaries, s.session_id)),
         ])
     # 注記行は「明細の後・TOTAL の前」に置く。仕様上 TOTAL は文字どおり最終行で、
     # tail -1 / 末尾行の読み取りで合計が取れることを保証する（0 セッションでも同様）。
@@ -947,7 +995,7 @@ def build_sessions_csv(agg: Aggregation, with_active: bool) -> str:
         "# 注記",
         "cost_usd / cost_jpy は行ごとに丸めています。TOTAL 行は丸め前の全体値から"
         "算出しているため、明細を SUM すると端数分（数円程度）ずれます。",
-    ] + [""] * 16)
+    ] + [""] * 17)
     if with_active:
         w.writerow([
             "# 注記",
@@ -955,7 +1003,7 @@ def build_sessions_csv(agg: Aggregation, with_active: bool) -> str:
             "fork でコピーされた親セッションの活動区間が重なるため、列を SUM しても "
             "TOTAL 行（全セッションを union した実処理時間）とは一致しません"
             "（列の合計は常に TOTAL 以上になります）。",
-        ] + [""] * 16)
+        ] + [""] * 17)
     unk_tok, tot_tok = _unknown_tokens_of(agg.report)
     if unk_tok:
         pct = (unk_tok / tot_tok * 100) if tot_tok else 0.0
@@ -965,14 +1013,14 @@ def build_sessions_csv(agg: Aggregation, with_active: bool) -> str:
             f"= 全体の {pct:.1f}%。コストはその分だけ過小です。"
         )
         # 表計算で列がずれないよう、ヘッダと同じ列数に揃える。
-        w.writerow(["# 注記", note] + [""] * 16)
+        w.writerow(["# 注記", note] + [""] * 17)
     gi, gw5, gw1, gr, go = _tokens_of(agg.report)
     w.writerow([
         "TOTAL", "", "", "", "", "",
         _fmt_hm(agg.active_sec_total) if with_active else "",
         len(agg.all_rows), gi, gw5, gw1, gr, go, gi + gw5 + gw1 + gr + go,
         f"{agg.report.total_usd:.4f}", int(round(agg.report.total_jpy)),
-        unknown_tokens(agg.report), "",
+        unknown_tokens(agg.report), "", "",
     ])
     return buf.getvalue()
 
@@ -1032,7 +1080,15 @@ def model_totals(agg: Aggregation) -> list:
     return out
 
 
-def build_summary_md(agg: Aggregation, label: str, with_active: bool) -> str:
+def build_summary_md(
+    agg: Aggregation,
+    label: str,
+    with_active: bool,
+    summaries: Optional[dict] = None,
+    overview: str = "",
+    summary_note: str = "",
+    phase_counts: Optional[dict] = None,
+) -> str:
     L = []
     A = L.append
     A(f"# 使用量レポート: {label}")
@@ -1045,6 +1101,14 @@ def build_summary_md(agg: Aggregation, label: str, with_active: bool) -> str:
     A(f"- 単価適用日: {agg.at.isoformat()} / 為替: {agg.usd_jpy} 円/USD"
       f" / pricing as_of: {agg.report.pricing_as_of}")
     A("")
+    # LLM 要約が有効なときだけ、期間全体の総括を最初に置く（無効・失敗時は節ごと出さない）。
+    if overview:
+        A("## この期間の作業")
+        A("")
+        for line in overview.splitlines():
+            if line.strip():
+                A(line.rstrip())
+        A("")
     A("## 合計")
     A("")
     A("| 項目 | 値 |")
@@ -1107,14 +1171,28 @@ def build_summary_md(agg: Aggregation, label: str, with_active: bool) -> str:
     A("## セッション一覧（コスト降順）")
     A("")
     if agg.sessions:
-        A("| セッション | リポジトリ | タイトル | 開始(JST) | 実処理 | コスト USD |")
-        A("|---|---|---|---|---:|---:|")
+        # 各セッションの下に要約行（多フェーズはさらにネスト）を添えるため、
+        # 表ではなくリストで出す（表の行間に子行は置けないため）。
         for s in agg.sessions:
-            title = (s.title or "(タイトルなし)").replace("|", "\\|")
-            A(f"| `{s.session_id[:8]}` | {repo_of(s, agg.root)} | {title} | "
-              f"{_jst_str(s.start_utc)} | "
-              f"{_fmt_hm(s.active_sec) if with_active else '-'} | "
-              f"${lib.fmt_usd(s.report.total_usd, 2)} |")
+            title = (s.title or "(タイトルなし)").replace("\n", " ")
+            A(f"- `{s.session_id[:8]}` **{repo_of(s, agg.root)}** — {title}")
+            A(f"  - {_jst_str(s.start_utc)} 開始 / 実処理 "
+              f"{_fmt_hm(s.active_sec) if with_active else '-'} / "
+              f"${lib.fmt_usd(s.report.total_usd, 2)}")
+            summ = summary_of(summaries, s.session_id)
+            if summ:
+                A(f"  - 要約: {summ}")
+            phases = phases_of(summaries, s.session_id)
+            if phases:
+                # 要約側のフェーズ行は digest のフェーズを畳んだものなので、
+                # 「これで全部」に見せないよう件数の対応を明示する。
+                n_digest = (phase_counts or {}).get(s.session_id)
+                if n_digest is not None and n_digest != len(phases):
+                    A(f"  - フェーズ（ダイジェスト {n_digest} 件 → 要約 {len(phases)} 件）:")
+                else:
+                    A("  - フェーズ:")
+                for i_ph, ph in enumerate(phases, 1):
+                    A(f"    - {i_ph}. {ph}")
     else:
         A("この期間に該当するセッションはありません。")
     A("")
@@ -1135,6 +1213,8 @@ def build_summary_md(agg: Aggregation, label: str, with_active: bool) -> str:
       "ずれることがあります（合計は丸め前の値から算出）。")
     for nmsg in agg.notes:
         A(f"- {nmsg}")
+    if summary_note:
+        A(f"- {summary_note}")
     A("")
     A(f"生成: {datetime.now(JST).strftime('%Y-%m-%d %H:%M:%S')} JST")
     A("")
@@ -1166,6 +1246,44 @@ def png_size(data: bytes) -> tuple:
         int.from_bytes(data[16:20], "big"),
         int.from_bytes(data[20:24], "big"),
     )
+
+
+# ---------------------------------------------------------------------------
+# ダイジェスト / 要約（digest.py・summarize.py への薄い入口）
+# ---------------------------------------------------------------------------
+# digest.py 側は usage_lib を import するため、ここでの import は**関数内の遅延
+# import** にして循環を避ける（charts.py と違い matplotlib 依存は無い）。
+
+def build_digests(sessions: list, period: Period, phase_gap_min: int = 30) -> dict:
+    import digest
+    return digest.build_digests(sessions, period, phase_gap_min)
+
+
+def digests_json(digests: dict, root: str, period: Period, phase_gap_min: int) -> str:
+    import digest
+    return digest.digests_json(digests, root, period, phase_gap_min)
+
+
+def deterministic_summaries(digests: dict) -> dict:
+    """LLM 無しの既定要約（{sid: {"summary": str, "phases": []}}）。"""
+    import digest
+    return {
+        sid: {"summary": digest.deterministic_summary(d), "phases": []}
+        for sid, d in digests.items()
+    }
+
+
+def summaries_dir() -> Path:
+    """LLM 要約キャッシュの置き場（``usage-report/var/summaries``）。
+
+    ``USAGE_REPORT_VAR_DIR`` で差し替えられる。偽 ``claude`` を使う縮退テストが
+    本番キャッシュへスタブ要約を書き込むと、以降の実行が黙ってそれを再利用して
+    捏造要約を出す（実際に検証中へ混入した）。テストは必ずこの環境変数で隔離する
+    （cost_lib の ``FCM_PROJECTS_DIR`` / ``FABLE_COST_MANAGER_ROOT`` と同じ流儀）。
+    """
+    override = os.environ.get("USAGE_REPORT_VAR_DIR")
+    base = Path(override).expanduser() if override else USAGE_REPORT_ROOT / "var"
+    return base / "summaries"
 
 
 def default_out_dir(root: str, label: str, period_label: str, now_jst: Optional[datetime] = None) -> Path:
