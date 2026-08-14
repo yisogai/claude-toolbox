@@ -17,6 +17,7 @@ private（`plans/` や社内向けスキルを含むため公開しない方針�
 | [`model-policy`](model-policy/) | サブエージェント（Agent ツール / Workflow の `agent()`）への **fable 割り当てをハーネスレベルで禁止**し、作業を opus（既定）へ振り分けてコストを制御する。コストの主制御は effort（探索=medium／検証=xhigh。下限 medium）で行い、sonnet は大量 fan-out 等の量的な段に限定して使う。fable/fork 禁止は PreToolUse hook で強制し、モデルの振り分けは CLAUDE.md 規範で担保する。特定サブエージェントの例外許可機構 `fable_exempt_subagent_types` はコードとして残るが現在未使用（旧 fable-advisor 運用は 2026-07-31 廃止）。 | PreToolUse / UserPromptSubmit hook 3本＋運用 CLI＋導入ドキュメント |
 | [`handoff`](handoff/) | `/compact` の**直前に引き継ぎファイルを生成**し、compact 後に無劣化で復元する。要約器が読めないファイルへ全文を保存し、`/compact` 引数にはパス参照だけを渡す方式。SessionStart(compact) hook による自動注入と statusline / 閾値通知を同梱。 | hook（compact 自動注入・閾値通知）・statusline・保存 CLI |
 | [`cost-manager`](cost-manager/) | Claude Code の transcript からタスク単位のコスト（USD + 参考JPY、モデル別内訳）を集計する。開始マーカーで計測範囲を区切り、完了時に Markdown + PNG カードのレポートを同一形式で出力する。予算マーカー・ETA・requestId dedup に対応。 | 計測・レポート生成スクリプト（cost_start / cost_status / cost_report ほか）＋Markdown / PNG テンプレート＋設定（単価・為替） |
+| [`usage-report`](usage-report/) | **指定ディレクトリの子・孫配下で実行された全セッション**を期間指定（月/週/任意、JST）で一括集計し、トークン使用量・従量課金換算コスト（USD/JPY）・作業内容サマリを CSV 2枚 + PNG 最大4枚 + summary.md に出力する。帰属判定はセッション起動時の `cwd`（メイン jsonl の最初の `cwd`）でセッション単位（エンコード名は非可逆のためヒントのみ）、dedup は全セッション共有の Accumulator、サブエージェント transcript 込み。単価・dedup 実装は cost-manager の `cost_lib.py` を import 再利用。 | 集計 CLI（usage_report / usage_lib / charts）＋設計ドキュメント。チャートは matplotlib（無い環境では CSV+md に自動縮退） |
 
 各スキルの詳細・仕組み・導入手順は、それぞれのディレクトリの **README.md / SKILL.md** を参照。
 
