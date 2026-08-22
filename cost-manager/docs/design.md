@@ -228,8 +228,220 @@ BASE 出力保証 → 予算セグメント連結）で拡張する。表示は�
 `thresholds_fired`（`active_task.json` に既に席を確保済み）で重複通知を抑止する。hook は必ず
 `exit 0` で終わる。
 
+## pace 実装（フェーズ2 その1・週次枠ペーシング）
+
+サブスクの週次枠（`rate_limits.seven_day`）・5時間枠（`five_hour`）・Fable の 50% サブ枠を
+「使い切れているか」を statusline に常時表示し、調整（並列度・effort）の判断材料となるサンプルを
+蓄積する。理想は「リセット時点で 100% 近くまで使い切る」こと（余らせるのも早期枯渇も NG）。
+
+### データ源
+
+Claude Code は statusline コマンドの stdin JSON に
+`rate_limits.five_hour.{used_percentage,resets_at}` と `rate_limits.seven_day.{...}` を渡す
+（Pro/Max、セッション初回 API 応答後のみ。各窓は独立に欠落しうる。`resets_at` は Unix epoch 秒。
+公式 docs: https://code.claude.com/docs/en/statusline ）。**Fable 専用のサブ枠フィールドは無い**ため、
+Fable の消費は transcript から推定する。
+
+### 仮定（いずれも [未検証]。実装ではパラメータ化してある）
+
+- **[未検証] A1**: 週次枠の消費は各モデルの「USD 換算コスト」に比例する（`pricing.json` の単価で
+  重み付け）。したがって Fable の枠内シェア = `fable_usd / total_usd`（窓内・全プロジェクト・dedup 済）、
+  Fable 推定使用率 = `seven_day.used × share`。実際の枠消費がトークン数基準・リクエスト数基準・
+  モデル別重み基準のいずれであるかは公開されておらず、検証できていない。
+- **[未検証] A2**: Fable の 50% 上限は同じ `seven_day` 窓に対する比率である
+  （`pricing.json` の `_billing_note` 記載の「週次リミットの50%まで」の解釈）。`fable_cap_pct` で変更可。
+- **[未検証] A3**: 窓の開始 = `resets_at − 7日`（5時間枠は `− 5時間`）。ローリングウィンドウであれば
+  この仮定は成り立たないが、`resets_at` 以外に窓の起点を知る手段が無い。
+- 較正（calibration）: 上記 A1 を実測で裏付ける・置き換えるための材料として、`samples.jsonl` の
+  隣接ペア（Δused ≥ 1%）について同区間の USD 増分 / Δused の中央値（= 週次枠 1% あたりの USD）を
+  算出して `cache.json` に載せる。ペアが 3 未満なら `null`。この値が安定すれば
+  「USD → 枠%」の直接換算に切り替えられる（今回は表示のみで、推定には使っていない）。
+
+### 別ライセンスのセッション除外（仕様）
+
+`license-switch`（同リポジトリ `license-switch/`）で案件ディレクトリごとに別アカウントへ
+切り替えている場合、そのセッションの消費は**別の週次枠**に載る。`pace_refresh.py` は
+セッション単位で最初の `cwd`（メイン jsonl の先頭の `"cwd"` フィールド。無ければ当該ファイル自身の
+先頭 `"cwd"`）を取り、次のいずれかに該当するセッションを集計から除外する。
+
+1. その `cwd` か祖先ディレクトリに `.envrc` があり、内容に
+   `generated-by: claude-toolbox/license-switch` を含む（direnv と同様に**最も近い** `.envrc` だけを見る）。
+2. `config.json` の `budget.pace.exclude_cwd_prefixes`（手動指定）のいずれかで始まる。
+
+除外したセッション数は `cache.json` の `notes` に載る。`cwd` が読めないセッションは除外しない
+（保守的に計上する）。`--no-exclude-license` で 1. を無効化できる。
+`exclude_cwd_prefixes` は絶対パス（`~` 可）で書く。`~` は展開し、末尾スラッシュは無視して
+ディレクトリ境界（`cwd == prefix` または `cwd` が `prefix/` で始まる）で一致させる。
+
+**[前提]** この除外が意味を持つのは、**direnv によるライセンス切替が実際に効いている**場合に限る。
+`license-switch` には「無効な OAuth トークンが設定されていると Claude Code が無言でメイン
+アカウントへフォールバックする」既知挙動がある（`license-switch` の実測知見）。その場合、
+実際にはメイン枠を消費しているセッションを `.envrc` の存在だけを見て除外してしまい、
+**週次枠の集計が過小になる**。`cache.json` の除外件数が想定より多いときは、対象ディレクトリで
+実際に別ライセンスが効いているかを確認すること。
+
+### 未収載モデルがあるときの扱い（Fable 推定不能）
+
+`pricing.json` に単価が無いモデルはトークン数だけ計上され USD が 0 になる。これを放置すると
+(a) 未収載の Fable（例: `claude-fable-6`）はシェア 0 → `F≈0%` を薄色で無警告表示し、
+「fable のまま使う余地あり」という**逆の推奨**を出す、(b) 未収載の非 Fable は USD の分母を
+縮めて Fable シェアを過大にする。したがって未収載モデルが 1 つでもあれば
+`cache.json` に `unknown_models` / `unknown_tokens` を載せたうえで
+`fable.share` / `fable.est_pct` / `fable.pace` を `null` にし、statusline は `F?!`（警告色）、
+`pace_report.py` は推奨の代わりに「未収載モデルがあるため Fable 推定不能: …」を出す。
+対処は `pricing.json` に単価を追加すること。
+
+### 集計失敗のネガティブキャッシュ
+
+statusline は `cache.json` の mtime だけで refresh の要否を判定する。そのため refresh が
+キャッシュを書かずに落ちると、statusline が呼ばれるたびに refresh を起動し続ける
+（無音の再起動ループ）。`pace_refresh.py` の `main()` は全例外を捕まえ、
+`{"computed_at", "error", "notes"}` の最小キャッシュを atomic に書いてから exit 1 する。
+mtime が進むので TTL のバックオフが効き、statusline は `error` キーを見て `F!`（警告色）を出す。
+併せて、読めない `*.jsonl` 1 つで全体が落ちないよう `cost_lib.iter_usage()` の `open()` は
+`OSError` を捕まえて 1 件 skip する（dedup ロジックには手を触れていない）。
+
+### 構成
+
+- `scripts/pace_statusline.sh`: 合成 wrapper。同期処理は jq + ファイル読みだけで、python を同期で
+  呼ばない。`license_statusline.sh`（→ `handoff_statusline.sh`）を無改変で呼んで BASE を得てから
+  pace セグメントを ` | ` で連結する。BASE が空でも pace セグメントは出す。
+- `scripts/pace_refresh.py`: 集計・キャッシュ更新。`cost_report.py --scope global` と同じ経路
+  （`iter_transcripts(glob_all=True)` → `collect_dedup_rows()` → `aggregate()`）を再利用しており、
+  dedup ロジックは複製していない。
+- `scripts/pace_report.py`: 人間向け CLI（スキルの「ペース確認」から呼ぶ）。
+- 状態は `var/pace/`（`samples.jsonl` / `cache.json` / `refresh.lock` / `sample.lock`）。
+
+### サンプル記録と single-flight refresh
+
+statusline は `rate_limits` があるときだけ `var/pace/samples.jsonl` へ 1 行追記する
+（`sample_min_interval_sec`（既定60秒）未満の連続入力はスロットル。直近行は `tail -1` で読み、
+壊れた行は無視する）。キャッシュが無い／`refresh_ttl_sec`（既定300秒）より古いときは
+`pace_refresh.py` をバックグラウンド起動する。
+
+記録される窓は `used_percentage` と `resets_at` が**両方揃っているもの**だけで、揃わない窓は
+`null` として記録する（片方だけの窓を記録すると、後段が「有効サンプル無し」と誤判定する）。
+`resets_at` は Unix epoch 秒として妥当な範囲（`0 < x < 2**31`）のものだけを受け付ける
+（ミリ秒値が来ると `datetime.fromtimestamp` が `year out of range` で落ちるため）。
+
+「直近行を読む → 追記する」は check-then-act であり、statusline が並行起動されると 60 秒
+スロットルが破れる（10 並列で 8 行入ることを実測）。そのため記録は `var/pace/sample.lock`
+（refresh 用とは別の mkdir ロック。stale 判定は 60 秒）で直列化する。**ロックが取れなければ
+記録は諦める（best-effort）**。サンプルは統計材料であり、1 サンプルの欠落より statusline を
+待たせないことを優先する。
+
+`pace_statusline.sh` の `SCRIPT_DIR` は bash だけで symlink を解決する（`readlink` のループ +
+`cd -P`）。macOS の `readlink` に `-f` が無く、`python3 -c 'os.path.realpath(...)'` は同期 python
+呼び出しになるため使えない。symlink 経由で配置する場合は `FABLE_COST_MANAGER_ROOT` の明示も推奨。
+
+ロックは **`mkdir` による single-flight**。ミニ仕様では `flock -n` を第一候補としていたが、
+macOS には `flock` コマンドが無く（実機で確認）、`mkdir` ロックは Linux/macOS の双方で正しく
+動作するため一本化した（二重実装は検証面積が増えるだけと判断）。ロックディレクトリの mtime が
+10 分を超えたものは stale として奪う。子プロセスは `nohup … &` で stdin/stdout/stderr を切り離し、
+終了時に自分で `rmdir` する。
+
+### 表示と色
+
+`📅W <used>%/<elapsed>% ·<pace>` / `F≈<est>%/<cap>% ·<pace_f>` / `⏱5h <used>%/<elapsed>%`。
+`pace = used / elapsed`、`elapsed < 1%` のときは `·—`。キャッシュが無ければ `F?`、
+`refresh_ttl_sec × 3` より古ければ薄色 + 末尾 `?`。
+
+色は `on_pace_band`（既定 `[0.8, 1.1]`）を基準に、薄色（余らせ気味）/ 緑（band 内）/
+黄（band 超過）/ 赤（band 超過かつ枯渇が早い）の4段。
+
+**仕様からの読み替え**: ミニ仕様の赤条件 `exhaust_before_reset`（`pace > 1` かつ
+`100/used × elapsed < 100`）は、展開すると `elapsed/used < 1` すなわち `pace > 1` と数学的に同値で、
+band 判定（`pace ≤ 1.1` は緑）を飲み込んで黄が到達不能になる。そこで赤は
+「枠を使い切る時点（`elapsed × 100 / used`）が窓の `exhaust_margin_pct`%（既定80）経過より前」
+と読み替えた。4段すべてが到達可能であることは実行確認済み
+（pace 0.35 薄色 / 0.96 緑 / 1.23 黄 / 1.66 赤）。
+
+### Fable の判別
+
+`billing_class()` は使えない。`pricing.json` 上 Fable は `billing: "included"`（Max/Team Premium に
+恒久包含）であり payg バケツに入らないためである。pace では
+`cost_lib.is_fable_model()`（モデル名に `fable` を含むか）で判別する。
+
+### 性能
+
+7日窓の全プロジェクト走査は実データ（dedup 後 13,036 行）で **6.6 秒**。`duration_sec` を
+`cache.json` に記録する。TTL 300 秒で十分なため増分 offset パースは実装していない。
+
+### statusLine への組み込み
+
+`~/.claude/settings.json` の `statusLine.command` を `pace_statusline.sh` に向ける
+（本実装は settings.json を書き換えない。README の手順を参照）。
+
+## Codex 使用量レーン（フェーズ2 その2）
+
+Claude 側（transcript 集計）と同じ画面で Codex 側の消費（クレジット）を見られるようにするレーン。
+入力は codex-bridge が書く使用量台帳 `codex-bridge/var/codex_usage.jsonl` で、**読み取り専用**
+（cost-manager からは一切書かない）。Claude 側の dedup 集計（`iter_usage` / `Accumulator` /
+`collect_dedup_rows` / `aggregate`）には手を触れていない。台帳は 1 ジョブ 1 行で、そもそも
+requestId 重複のような二重計上の構造が無いため dedup も不要である。
+
+### データ源と解決順
+
+- パス: env `FCM_CODEX_LEDGER` > `config.json` の `budget.pace.codex_ledger` > 既定
+  `../codex-bridge/var/codex_usage.jsonl`。相対パスは `cost_lib.code_root()`（スクリプトの実位置）
+  基準で解決するため、`FABLE_COST_MANAGER_ROOT` を差し替えるテストでも既定値は移動しない。
+- 単価: `codex-bridge/config/codex_pricing.json`（credits per MTok）。台帳パスとは独立に
+  `code_root()` 基準で解決する（台帳だけスクラッチへ向けても単価表は本物を読めるように）。
+
+### 行の扱い
+
+- `ts` は **ISO8601 文字列と epoch 数値の両対応**。codex-bridge の現行実装
+  （`codex_run.py` の `append_ledger` → `codex_lib.iso()`）は `2026-08-22T09:15:03Z` 形式の
+  ISO 文字列を書く（実装を読んで確認済み）。epoch は `0 < x < 2**31` の範囲だけ受ける
+  （ミリ秒値を秒として誤解釈しないため）。
+- 無視する行（`ignored_rows` として件数を注記に出す）: `mock` が非 null ／ `usage` が無い or dict
+  でない ／ JSON として壊れている ／ `ts` が欠落・不正 ／ クレジットが NaN・inf。窓外の行は
+  「無視」ではなく `out_of_window` として別に数える（`cost_report.py` は「範囲外 N 件」と注記する）。
+  NaN・inf を合算すると合計が NaN になり、`json.dumps` が JSON として不正な `NaN` リテラルを
+  書いて statusline の jq がキャッシュ全体を読めなくなる（🅒 も F も消える）ため、
+  `aggregate_codex()` が `math.isfinite()` で落として `ignored` に数える。
+- 台帳が**存在するのに開けない**ときは `stats["unreadable"]=1` を立て、「台帳を読めませんでした:
+  <path>」と注記する（「台帳がまだ無い」= 正常、と区別するため）。
+  ※ codex-bridge の現行台帳には `mock` フィールドが**常に書かれる**（実行時は `null`）。
+  モック実行の行はそもそも書き手側で台帳から除外されているため、読み手側の
+  「`mock` が非 null なら無視」は二重防御である（書き手が仕様を変えても効く）。
+- クレジットは行の `credits_est` を優先し、無ければ単価表から再計算する（`codex_credits_for()`）。
+  計算式は codex-bridge の `codex_lib.credits_est()` と同一（いずれも [未確認] の解釈:
+  `input_tokens` は cached を内包 / `cache_write_input_tokens` は input 単価 /
+  `reasoning_output_tokens` は output に内包）。単価も `credits_est` も無いモデルは 0 として扱い、
+  `unknown_models` と注記に出す。
+
+### 窓と % の扱い（[未検証]）
+
+- Codex の枠は「5時間窓 + 週次」で**絶対値が非公開**。したがって既定では % を出さず、消費
+  クレジットと件数だけを出す。`budget.pace.codex_weekly_credits` を設定したときだけ
+  `used_pct` / `pace` / `projected_end_pct` を計算する（未設定なら `weekly_cap: null`）。
+- 窓は Claude の `seven_day` 窓（`resets_at − 7日 〜 now`）をそのまま流用する。**Codex 側の週次窓は
+  リセット時刻が別**なので近似であり、`codex.notes` に毎回明示する。
+- 5時間窓は「窓終端から遡った 5 時間」。Codex 側の 5 時間窓のリセット時刻は取得手段が無い。
+- `cost_report.py` の Codex 窓の終端は **`until`（Claude 行と同じ）** であり、`end_display` では
+  ない。`end_display` は「最終 Claude アクティビティ」へ手前に補正されるため、それを終端にすると
+  「Claude は待っているだけで、その間に完了した Codex ジョブ」が無注記で落ちる。
+
+### 出力先
+
+- `pace_refresh.py`: `cache.json` に `codex`（台帳が無ければ `null`。サンプル無しで窓が決まらない
+  場合も `null`）。
+- `pace_statusline.sh`: `codex` があるときだけ末尾に `🅒` セグメントを足す。cache.json を読む
+  既存の jq 呼び出しにフィールドを足しただけで **jq の起動回数は増やしていない**。台帳が無い場合の
+  出力は変更前と**バイト単位で同一**（テストで担保）。
+- `pace_report.py`: 「Codex」節（窓内クレジット・件数・モデル別・5時間窓・上限の有無・無視行数・
+  注記）と `--json` の `codex` キー。値は `cache.json` の丸ごと引き渡し（再計算しない）。
+- `cost_report.py`: レポート Markdown の「## Codex（参考）」表と `var/log/reports.jsonl` の
+  `codex` キー。範囲は表示用の開始〜終了と揃える。`--scope session`（既定）は
+  `claude_session_id` が対象セッション ID と一致する行だけ、`--scope global` は時間窓のみ。
+  クレジットは USD 合計には**含めない**（別通貨・別枠のため）。PNG カードは変更していない。
+
 ## 既知の制約
 
+- Codex レーンの `claude_session_id` は codex-bridge が env `CLAUDE_CODE_SESSION_ID` から拾うため、
+  env 無しで実行された Codex ジョブは `null` になり `--scope session` では拾えない
+  （件数を注記に出し、`--scope global` へ誘導する）。
 - `--scope global` は全プロジェクトの時間窓走査になるため、並行して動いている無関係セッションの
   usage を拾う可能性がある（レポートに注記を出す）。
 - レポート生成コマンド自体のトークン消費は「until=now のスナップショット確定後」に発生するため

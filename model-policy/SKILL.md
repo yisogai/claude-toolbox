@@ -14,8 +14,8 @@ description: サブエージェントのモデル使用ポリシー（fable禁�
 | 1 | `model_policy_agent_hook.sh`（PreToolUse "Agent\|Task"） | fork→deny / **fable→常に deny**（`fable_exempt_subagent_types` の例外リストは現在空） / 未指定・inherit→opus に書き換え / allowed は素通し | **強制** |
 | 1b | `model_policy_workflow_hook.sh`（PreToolUse "Workflow"） | script に `agent(` があり `model` 語ゼロ→deny / `model` 値に `fable`→deny（例外なし） | **強制** |
 | 2 | `~/.claude/CLAUDE.md` 追記 | fable=統括専任・作業を opus/sonnet に振り分けて委譲・agent() は model 明示・fork 禁止 | 規範（compact 後も残る） |
-| 3 | `model_policy.sh`（このスキル） | status / relax / reset / off / enforce / exempt [日数]\|clear\|disable の運用 CLI | 運用 |
-| 4 | `model_policy_reminder_hook.sh`（UserPromptSubmit） | 緩和中／恒久 model=fable／fable 例外の失効48時間前（TTL 設定時）のときだけ注入（平常時は無出力=トークンゼロ） | 可視化 |
+| 3 | `model_policy.sh`（このスキル） | status / relax / reset / off / enforce / exempt [日数]\|clear\|disable / **tune**（調整ノブ）の運用 CLI | 運用 |
+| 4 | `model_policy_reminder_hook.sh`（UserPromptSubmit） | 緩和中／恒久 model=fable／fable 例外の失効48時間前（TTL 設定時）／**週次ペースが逼迫・余らせ気味・Fable 超過**のときだけ注入（pace が中間 1.0〜1.1 または不明なら無出力＝トークンゼロ。逼迫/余裕はセッションごとに 1 回） | 可視化 |
 
 状態はランタイムの `~/.claude/model-policy/policy.json` で表現し、hook は発火のたび読み直すため**再起動なしで緩和/復元が反映**される。「緩和」は mode ではなく `relaxed_until`（未来 epoch 秒）で表し、**TTL 失効で自動的に enforce へ復帰**する（戻し忘れ事故を構造的に排除）。ファイルが無い/壊れていても hook 内蔵の enforce デフォルトが効く。
 
@@ -42,6 +42,13 @@ bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" enforce
 # タスク/プロジェクト単位で緩和（cwd の ./.claude/model-policy.json を対象に）
 bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" --project relax 30
 
+# 調整ノブ（effort マトリクス・並列度・Codex 既定・週次ペース連動。README §8）
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune                  # 実効値の表
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune effort review    # 実効 effort を1語だけ
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune set effort.spec high
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune init             # 既定で tuning.json を生成
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune reset            # 削除して内蔵既定へ
+
 # fable 例外の TTL 操作（advisor 廃止済み・現在未使用。通常は使わない。README §7-4）
 bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" exempt 14       # 任意の期限を設定（従量化リスク時）
 bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" exempt clear    # TTL 解除（無期限へ戻す）
@@ -49,10 +56,31 @@ bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" exempt d
 ```
 
 運用ルール:
-- どのサブコマンドを実行しても、CLI は末尾に `status` 相当を出力する。**その出力を必ずユーザーに日本語で要約報告**すること（実効状態・残り時間・有効ファイル・ハートビート）。
+- `status` / `relax` / `reset` / `off` / `enforce` / `exempt` は、末尾に `status` 相当を出力する。**その出力を必ずユーザーに日本語で要約報告**すること（実効状態・残り時間・有効ファイル・ハートビート）。
+  - **`tune` 系は例外**: `tune` / `tune set` / `tune init` / `tune reset` は末尾に `tune` の表を出す（`status` 相当は出さない）。`tune effort <役割>` は**1 語だけ**を出す契約なので、表も status も付かない（機械可読）。
 - ユーザーに頼まれて `relax` したら、**そのタスクが終わったら `reset` を促す**こと（TTL でも自動復帰するが、明示的に戻すのが安全）。
 - `deny` されたら理由文に従い `model:"opus"` を明示して Agent を再実行する。fable/fork がどうしても必要なら、ユーザーに `/model-policy relax` を依頼する（Claude 自身は relax しない。ユーザーの承認行為）。
 - サブエージェントを使った直後に `status` のハートビートが「未発火」や極端に古い場合は、hook が機能していない可能性がある（README の検知手段を参照）。
+
+## Workflow / サブエージェントを書く前に（effort の決め方）
+
+**Workflow の `agent()` やサブエージェント委譲を書く前に、effort を調整ノブから取る**。CLAUDE.md の散文を思い出して当てるのではなく、実効値を叩いて決める（週次枠のペースに応じてレビュー/検証が自動で切り替わるため）。
+
+```bash
+# 役割ごとの実効 effort を1語で取得（fanout / implement / spec / synthesize / review / verify）
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune effort review   # → xhigh または high
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune effort verify
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune effort implement
+
+# 迷ったら全体像（並列度の既定・Codex 既定・pace の根拠・助言）を一度だけ見る
+bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune
+```
+
+- 取得した値を `agent(..., opts: { effort: '<取得値>' })` にそのまま書く（model は常に明示。既定 `opus`）。
+- `tune effort` は**1 語だけ**を stdout に出す（未知の役割は exit 1）。パイプで直接埋め込んでよい。
+- 並列 fan-out の既定数は `tune` の `fanout_default`、Workflow の上限は `workflow_max_agents` を見る。
+- 週次ペースが逼迫していると review/verify が自動で `high` に落ちる。**それを xhigh に戻すのはユーザーの判断**（`tune set` はユーザー依頼時のみ）。
+- `tune set` は**葉のキーだけ**を受け取り、内蔵既定と同じ型（数値 / 真偽 / 文字列 / effort 語彙）でなければ exit 1 になる（`tune set effort xhigh` のような非葉キーはスキーマを壊すので拒否）。
 
 ## settings.json 配線（自己文書化）
 

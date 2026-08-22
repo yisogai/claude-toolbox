@@ -14,6 +14,16 @@
   "budget": {
     "default_thresholds": [50, 80, 100],
     "monitor_cache_ttl_sec": 25,
-    "desktop_notify": false
+    "desktop_notify": false,
+    "pace": {
+      "fable_cap_pct": 50,
+      "refresh_ttl_sec": 300,
+      "sample_min_interval_sec": 60,
+      "on_pace_band": [0.8, 1.1],
+      "exhaust_margin_pct": 80,
+      "exclude_cwd_prefixes": [],
+      "codex_ledger": "../codex-bridge/var/codex_usage.jsonl",
+      "codex_weekly_credits": null
+    }
   }
 }

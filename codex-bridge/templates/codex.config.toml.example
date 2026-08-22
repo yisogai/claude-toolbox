@@ -1,0 +1,28 @@
+# 推奨 ~/.codex/config.toml（codex-bridge 前提）
+# コピー先: ~/.codex/config.toml（既存があれば差分をマージすること）
+
+# 環境に OPENAI_API_KEY があると無言で API 従量課金へ切り替わる既知問題（#20099）を防ぐ。
+# codex_run.py も子プロセス環境からキーを削除するが、二重に塞いでおく。
+forced_login_method = "chatgpt"
+
+# 既定モデル・推論強度。codex_run.py は -m / -c model_reasoning_effort で毎回明示するため、
+# ここの値は素の `codex` を手で叩いたときの既定として効く。
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+
+# 非対話実行では承認プロンプトが出ると詰まるので never。
+# 書込可否は codex_run.py 側の -s（read-only / workspace-write）で制御する。
+approval_policy = "never"
+sandbox_mode = "read-only"
+
+[profiles.sol]
+model = "gpt-5.6-sol"
+model_reasoning_effort = "xhigh"
+
+[profiles.terra]
+model = "gpt-5.6-terra"
+model_reasoning_effort = "high"
+
+[profiles.luna]
+model = "gpt-5.6-luna"
+model_reasoning_effort = "medium"

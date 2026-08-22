@@ -27,6 +27,12 @@ Python の対話的呼び出しで行う。
     scan_activity(tfiles, gap_max_sec)               -- 実処理時間（active time）用の活動走査
     active_seconds(intervals, clip_start, clip_end)  -- interval union のクリップ済み合計秒
     load_config() / load_pricing()
+    pace_dir() / pace_config(config)                 -- 週次枠ペーシング（フェーズ2）用
+    codex_ledger_path(config) / load_codex_pricing() -- Codex 使用量レーン（読み取り専用）
+    iter_codex_ledger(path, since, until, stats) / codex_credits_for(model, usage, pricing)
+    aggregate_codex(rows, pricing)
+    first_cwd_of(path) / is_license_switched_dir(cwd) -- セッションの cwd 解決・別ライセンス判定
+    row_cost_usd(row, pricing, at)                    -- dedup 済み1行の USD（時刻で切る部分和用）
     resolve_model(model, pricing) / rate_for(resolved, pricing, at)
     billing_class(agg, pricing)                      -- "payg"(Fable) | "included"(Max20x込み) 判定
     aggregate(rows, pricing, at, usd_jpy) -> Report
@@ -40,6 +46,7 @@ from __future__ import annotations
 
 import glob as _glob
 import json
+import math
 import os
 import re
 import tempfile
@@ -193,6 +200,12 @@ def iter_usage(path, start_offset: int = 0):
         最終行が改行で終わっていない場合はその行の先頭を new_offset とし、次回に回す。
         壊れた行（JSON decode error）は skip する。
         message.model が欠落 or "<synthetic>" の行は集計対象外として skip する。
+        JSON パースの失敗は `JSONDecodeError` に限らない（4,300 桁超の整数リテラルは
+        `ValueError`、極端に深いネストは `RecursionError`）ため、どちらも skip 扱いにする。
+
+    開けないファイル（権限なし・途中で消えた等）は `(rows, start_offset)` を返して 1 件
+    skip する（例外を投げない）。statusline からのバックグラウンド集計が読めないファイル
+    1 つで落ちると再起動ループになるため（docs/design.md 参照）。
     """
     path = Path(path)
     rows = []
@@ -204,7 +217,12 @@ def iter_usage(path, start_offset: int = 0):
     if start_offset < 0 or start_offset > size:
         start_offset = 0
 
-    with open(path, "rb") as f:
+    try:
+        fh = open(path, "rb")
+    except OSError:
+        return rows, start_offset
+
+    with fh as f:
         f.seek(start_offset)
         pos = start_offset
         for raw in f:
@@ -218,7 +236,9 @@ def iter_usage(path, start_offset: int = 0):
                 continue
             try:
                 obj = json.loads(line)
-            except json.JSONDecodeError:
+            except (ValueError, RecursionError):
+                # JSONDecodeError は ValueError のサブクラス。4,300 桁超の整数リテラルは
+                # 素の ValueError、極端に深いネストは RecursionError になるため両方を skip する。
                 continue
             if not isinstance(obj, dict):
                 continue
@@ -394,7 +414,10 @@ def find_first_user_text(tfiles: Iterable, since=None, until=None, limit: int = 
                         continue
                     try:
                         obj = json.loads(line)
-                    except json.JSONDecodeError:
+                    except (ValueError, RecursionError):
+                        # iter_usage と同じ理由（巨大整数リテラル / 深いネスト）で skip する
+                        continue
+                    if not isinstance(obj, dict):
                         continue
                     if obj.get("type") != "user":
                         continue
@@ -583,7 +606,8 @@ def _scan_file_events(path) -> list:
                     continue
                 try:
                     rec = json.loads(line)
-                except json.JSONDecodeError:
+                except (ValueError, RecursionError):
+                    # iter_usage と同じ理由（巨大整数リテラル / 深いネスト）で skip する
                     continue
                 if not isinstance(rec, dict):
                     continue
@@ -1120,6 +1144,455 @@ def archive_task(obj: dict) -> Path:
     if p.exists():
         p.unlink()
     return dest
+
+
+# ---------------------------------------------------------------------------
+# 週次枠ペーシング（pace / フェーズ2）
+# ---------------------------------------------------------------------------
+# ここに置くのは pace_statusline.sh / pace_refresh.py / pace_report.py が共有する
+# 補助関数のみ。dedup 系（iter_usage / Accumulator / collect_dedup_rows / aggregate）
+# には一切手を触れない。
+
+# config/config.json の budget.pace が欠けている場合の既定値。
+PACE_DEFAULTS = {
+    "fable_cap_pct": 50,
+    "refresh_ttl_sec": 300,
+    "sample_min_interval_sec": 60,
+    "on_pace_band": [0.8, 1.1],
+    "exhaust_margin_pct": 80,
+    "exclude_cwd_prefixes": [],
+    # Codex 使用量レーン（codex-bridge の台帳を読むだけ。書き込みは一切しない）。
+    # 相対パスは code_root()（scripts/ の親）基準で解決する。
+    "codex_ledger": "../codex-bridge/var/codex_usage.jsonl",
+    # Codex の週次上限（クレジット）。公開値が無いため既定は null（= 上限未設定）。
+    "codex_weekly_credits": None,
+}
+
+# license-switch（claude-toolbox/license-switch）が生成する .envrc のマーカー。
+# この .envrc が効いているディレクトリで動いたセッションは別ライセンス（別の週次枠）の
+# 消費なので、pace の集計からは除外する。
+LICENSE_SWITCH_MARKER = "generated-by: claude-toolbox/license-switch"
+
+_CWD_RE = re.compile(rb'"cwd"\s*:\s*"((?:[^"\\]|\\.)*)"')
+
+
+def pace_dir() -> Path:
+    """pace の状態ディレクトリ（var/pace）。samples.jsonl / cache.json / refresh.lock の置き場。"""
+    return repo_root() / "var" / "pace"
+
+
+def pace_config(config: dict) -> dict:
+    """config.json の budget.pace を既定値とマージして返す（欠落キーは PACE_DEFAULTS）。"""
+    merged = dict(PACE_DEFAULTS)
+    raw = ((config or {}).get("budget") or {}).get("pace") or {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            if v is not None:
+                merged[k] = v
+    return merged
+
+
+def first_cwd_of(path, max_lines: int = 200) -> Optional[str]:
+    """transcript JSONL の先頭付近から最初の "cwd" フィールド値を取り出す（無ければ None）。
+
+    セッションの帰属先ディレクトリ判定用。全行を json.loads すると重いので正規表現で
+    バイト列から拾い、見つかった行だけ JSON エスケープを解く。
+    """
+    try:
+        with open(path, "rb") as f:
+            for i, raw in enumerate(f):
+                if i >= max_lines:
+                    break
+                if b'"cwd"' not in raw:
+                    continue
+                m = _CWD_RE.search(raw)
+                if not m:
+                    continue
+                try:
+                    val = json.loads('"' + m.group(1).decode("utf-8", errors="replace") + '"')
+                except json.JSONDecodeError:
+                    continue
+                if val:
+                    return val
+    except OSError:
+        return None
+    return None
+
+
+def is_license_switched_dir(cwd: Optional[str], marker: str = LICENSE_SWITCH_MARKER) -> bool:
+    """cwd（またはその祖先ディレクトリ）に license-switch 生成の .envrc があるかどうか。
+
+    direnv の探索と同じく自ディレクトリから上へ辿り、最初に見つかった `.envrc` の内容に
+    marker が含まれていれば True。読めない `.envrc` は「該当しない」として扱い、さらに
+    上位は探索しない（direnv も最も近い .envrc を使うため）。
+    """
+    if not cwd:
+        return False
+    try:
+        p = Path(cwd)
+    except (TypeError, ValueError):
+        return False
+    for d in [p] + list(p.parents):
+        envrc = d / ".envrc"
+        try:
+            if not envrc.is_file():
+                continue
+            with open(envrc, "r", encoding="utf-8", errors="replace") as f:
+                head = f.read(8192)
+        except OSError:
+            return False
+        return marker in head
+    return False
+
+
+def row_cost_usd(row: dict, pricing: dict, at: date) -> float:
+    """dedup 済み1行の USD コスト。未知モデルは 0.0。
+
+    `aggregate()` と同じ単価式（トークン数に対して線形）を1行単位に適用したもの。
+    aggregate() はモデル別に合算したトークン数へ同じ式を適用するため、窓内の全行に
+    ついてこの関数を合計すると aggregate().total_usd と一致する（テストで担保）。
+    calibration（サンプル間の USD 増分）のように「時刻で切った部分和」が必要な用途
+    専用であり、aggregate() 側のロジックには手を触れていない。
+    """
+    resolved = resolve_model(row.get("model"), pricing)
+    rate = rate_for(resolved, pricing, at) if resolved else None
+    if rate is None:
+        return 0.0
+    usage = row.get("usage") or {}
+    w5, w1h = _extract_cache_creation(usage)
+    return (
+        _int_or_zero(usage.get("input_tokens")) / 1_000_000 * rate["input"]
+        + w5 / 1_000_000 * rate["write_5m"]
+        + w1h / 1_000_000 * rate["write_1h"]
+        + _int_or_zero(usage.get("cache_read_input_tokens")) / 1_000_000 * rate["read"]
+        + _int_or_zero(usage.get("output_tokens")) / 1_000_000 * rate["output"]
+    )
+
+
+def is_fable_model(model: Optional[str], resolved: Optional[str] = None) -> bool:
+    """モデル名が Fable 系かどうか（週次枠の 50% サブ枠の対象）。
+
+    `billing_class()` は使えない。pricing.json 上 Fable は `billing: "included"`
+    （Max/Team Premium に恒久包含）であり、payg バケツには入らないため。
+    """
+    name = resolved or model or ""
+    return "fable" in name.lower()
+
+
+def read_last_jsonl_line(path, tail_bytes: int = 65536) -> Optional[dict]:
+    """JSONL の最終有効行を dict で返す（壊れた行・空ファイルは None）。
+
+    末尾 tail_bytes だけを読むため、行数が増えても一定時間で終わる（10万行でも同じ）。
+    末尾から遡って最初にパースできた行を返す。
+    """
+    path = Path(path)
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return None
+    if size == 0:
+        return None
+    try:
+        with open(path, "rb") as f:
+            start = max(0, size - tail_bytes)
+            f.seek(start)
+            chunk = f.read()
+    except OSError:
+        return None
+    lines = chunk.decode("utf-8", errors="replace").splitlines()
+    if start > 0 and lines:
+        # 先頭は途中で切れている可能性があるため捨てる
+        lines = lines[1:]
+    for line in reversed(lines):
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            return obj
+    return None
+
+
+# ---------------------------------------------------------------------------
+# Codex 使用量レーン（codex-bridge の台帳を読む。読み取り専用）
+# ---------------------------------------------------------------------------
+# codex-bridge/scripts/codex_run.py が `var/codex_usage.jsonl` に O_APPEND で 1 行ずつ
+# 追記する台帳を読むだけのレーン。cost-manager 側からこのファイルへ書き込むことは無い。
+# Claude 側の dedup 集計（iter_usage / Accumulator / collect_dedup_rows / aggregate）とは
+# 完全に独立している（台帳は 1 ジョブ 1 行で、そもそも重複排除の対象ではない）。
+
+# 台帳 1 行の usage フィールド（codex-bridge の turn.completed イベント由来）。
+CODEX_USAGE_FIELDS = (
+    "input_tokens",
+    "cached_input_tokens",
+    "cache_write_input_tokens",
+    "output_tokens",
+    "reasoning_output_tokens",
+)
+
+
+def codex_ledger_path(config: Optional[dict] = None) -> Path:
+    """Codex 使用量台帳のパス。
+
+    優先順位:
+      1. env `FCM_CODEX_LEDGER`（テスト隔離・別配置用）
+      2. `config.json` の `budget.pace.codex_ledger`
+      3. PACE_DEFAULTS の既定（`../codex-bridge/var/codex_usage.jsonl`）
+    `~` は展開する。相対パスは `code_root()`（scripts/ の親＝スクリプトの実位置基準）で
+    解決するため、`FABLE_COST_MANAGER_ROOT` を差し替えるテストでも既定値は移動しない。
+    """
+    env = os.environ.get("FCM_CODEX_LEDGER")
+    raw = env if env else pace_config(config or {}).get("codex_ledger")
+    if not raw:
+        raw = PACE_DEFAULTS["codex_ledger"]
+    p = Path(os.path.expanduser(str(raw)))
+    if not p.is_absolute():
+        p = code_root() / p
+    return Path(os.path.normpath(str(p)))
+
+
+def codex_pricing_path() -> Path:
+    """Codex の単価表（credits per MTok）。codex-bridge 同梱の JSON を読むだけ。
+
+    台帳パス（`codex_ledger`）とは独立に `code_root()` 基準で固定的に解決する
+    （台帳だけをテスト用スクラッチへ向けても単価表は本物を読めるようにするため）。
+    env `FCM_CODEX_PRICING` で上書き可。
+    """
+    env = os.environ.get("FCM_CODEX_PRICING")
+    if env:
+        return Path(os.path.expanduser(env))
+    return code_root().parent / "codex-bridge" / "config" / "codex_pricing.json"
+
+
+def load_codex_pricing(path=None) -> dict:
+    """Codex 単価表を読む。欠落・破損時は空の単価表を返す（例外にしない）。
+
+    Claude 側の pricing.json と違い、これが無くても cost-manager 本体の機能は動くべき
+    （台帳行に `credits_est` があればそちらを優先して使う）ため ConfigError にしない。
+    """
+    p = Path(path) if path else codex_pricing_path()
+    try:
+        with open(p, encoding="utf-8") as f:
+            obj = json.load(f)
+    except (OSError, json.JSONDecodeError):
+        return {"as_of": None, "unit": "credits_per_mtok", "models": {}, "notes": []}
+    return obj if isinstance(obj, dict) else {"models": {}}
+
+
+def normalize_codex_usage(usage) -> Optional[dict]:
+    """台帳行の usage を 5 フィールドの int dict に正規化する（dict でなければ None）。"""
+    if not isinstance(usage, dict):
+        return None
+    return {k: _int_or_zero(usage.get(k)) for k in CODEX_USAGE_FIELDS}
+
+
+def codex_credits_for(model: Optional[str], usage, pricing: dict) -> Optional[float]:
+    """単価表からクレジット概算を計算する。モデル未収載・usage 不正なら None。
+
+    計上ルールは codex-bridge の `codex_lib.credits_est()` と同じ（いずれも [未確認]）:
+      - `input_tokens` は `cached_input_tokens` を内包すると解釈し、非キャッシュ入力 = input − cached
+      - `cache_write_input_tokens` は input 単価
+      - `reasoning_output_tokens` は `output_tokens` に内包されるとみなし二重計上しない
+    """
+    u = normalize_codex_usage(usage)
+    if u is None:
+        return None
+    entry = ((pricing or {}).get("models") or {}).get(model)
+    if not isinstance(entry, dict):
+        return None
+    fresh_input = max(0, u["input_tokens"] - u["cached_input_tokens"])
+    total = (
+        fresh_input * float(entry.get("input", 0))
+        + u["cache_write_input_tokens"] * float(entry.get("input", 0))
+        + u["cached_input_tokens"] * float(entry.get("cached_input", 0))
+        + u["output_tokens"] * float(entry.get("output", 0))
+    ) / 1_000_000.0
+    return round(total, 4)
+
+
+def parse_codex_ts(v) -> Optional[datetime]:
+    """台帳の `ts` を aware datetime(UTC) にする。ISO8601 文字列と epoch 数値の両対応。
+
+    codex-bridge の現行実装（`codex_run.py` → `codex_lib.iso()`）は
+    `2026-08-22T09:15:03Z` 形式の ISO 文字列を書くが、仕様上 epoch 数値も受ける。
+    epoch は 0 < x < 2**31 の範囲だけ有効（ミリ秒値を秒として誤解釈しないため）。
+    パースできなければ None。
+
+    タイムゾーン欠落（naive）の ISO 文字列は **UTC とみなす**（`parse_iso` の挙動）。
+    書き手である codex-bridge の `codex_lib.iso()` は常に `Z` 付き（UTC）を書くため
+    現行の台帳で naive が現れることはなく、この解釈は前方互換のための保険である。
+    ※ 書き手側の `codex_lib.parse_iso()` は naive を **JST** 解釈するので解釈が異なるが、
+      台帳の `ts` は常に Z 付き UTC で書かれるため実データで食い違うことはない。
+    """
+    if v is None or isinstance(v, bool):
+        return None
+    if isinstance(v, (int, float)):
+        if not (0 < float(v) < 2 ** 31):
+            return None
+        return datetime.fromtimestamp(float(v), tz=UTC)
+    if isinstance(v, str):
+        s = v.strip()
+        if not s:
+            return None
+        try:
+            return parse_iso(s)
+        except (ValueError, TypeError):
+            pass
+        try:
+            f = float(s)
+        except ValueError:
+            return None
+        if not (0 < f < 2 ** 31):
+            return None
+        return datetime.fromtimestamp(f, tz=UTC)
+    return None
+
+
+def iter_codex_ledger(
+    path,
+    since: Optional[datetime] = None,
+    until: Optional[datetime] = None,
+    stats: Optional[dict] = None,
+) -> Iterator[dict]:
+    """Codex 使用量台帳（JSONL）を読み、時間窓に入る有効行を dict で列挙する。
+
+    各行に `ts_dt`（aware datetime, UTC）と `credits`（float | None）を足して返す。
+    `credits` は行の `credits_est` が数値ならそれを優先し、無ければ単価表から再計算する
+    （呼び出し側で単価表を渡す必要があるため、ここでは計算せず `credits_est` のみを
+    載せる。単価計算は `aggregate_codex()` が行う）。
+
+    無視する行（`stats` に理由別の件数を書く）:
+      - JSON として壊れている / dict でない            -> "broken"
+      - `mock` が非 null（モック実行の行）              -> "mock"
+      - `usage` が無い・dict でない                     -> "no_usage"
+      - `ts` が欠落・パース不能・範囲外                 -> "bad_ts"
+    窓の外の行は "out_of_window" として数え、無視行（ignored）には含めない。
+    ファイルが存在しない・読めない場合は何も yield しない（例外にしない）。存在するのに
+    開けなかった場合だけ `stats["unreadable"]=1` を立てる（呼び出し側が「台帳が無い」と
+    「台帳を読めない」を区別して注記できるようにするため）。
+    """
+    counts = {"total": 0, "broken": 0, "mock": 0, "no_usage": 0, "bad_ts": 0,
+              "out_of_window": 0, "kept": 0, "unreadable": 0}
+    p = Path(path)
+    try:
+        fh = open(p, "r", encoding="utf-8", errors="replace")
+    except OSError:
+        if stats is not None:
+            # 存在しない（まだ 1 件も無い）のは正常。存在するのに開けないのは異常として印を付ける。
+            counts["unreadable"] = 1 if p.exists() else 0
+            stats.update(counts)
+            stats["ignored"] = 0
+        return
+
+    with fh as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            counts["total"] += 1
+            try:
+                obj = json.loads(line)
+            except (ValueError, RecursionError):
+                # JSONDecodeError だけでは足りない: 4,300 桁を超える整数リテラルは
+                # `ValueError: Exceeds the limit ... for integer string conversion`、
+                # 極端に深いネストは RecursionError になる（実際に再現を確認）。
+                # 台帳の 1 行で集計全体を落とさないため、どちらも「壊れた行」として skip する。
+                counts["broken"] += 1
+                continue
+            if not isinstance(obj, dict):
+                counts["broken"] += 1
+                continue
+            if obj.get("mock") is not None:
+                counts["mock"] += 1
+                continue
+            if not isinstance(obj.get("usage"), dict):
+                counts["no_usage"] += 1
+                continue
+            dt = parse_codex_ts(obj.get("ts"))
+            if dt is None:
+                counts["bad_ts"] += 1
+                continue
+            if (since is not None and dt < since) or (until is not None and dt > until):
+                counts["out_of_window"] += 1
+                continue
+            counts["kept"] += 1
+            row = dict(obj)
+            row["ts_dt"] = dt
+            yield row
+
+    if stats is not None:
+        stats.update(counts)
+        stats["ignored"] = counts["broken"] + counts["mock"] + counts["no_usage"] + counts["bad_ts"]
+
+
+def aggregate_codex(rows: Iterable, pricing: dict) -> dict:
+    """`iter_codex_ledger()` の行をモデル別に合算する。
+
+    戻り値:
+      {"credits": float, "jobs": int, "unknown_models": [str], "ignored": int,
+       "by_model": {model: {"credits": float, "jobs": int, "output_tokens": int,
+                            "input_tokens": int, "known": bool}}}
+    行の `credits_est` が数値ならそれを優先し、無ければ単価表から再計算する。
+    どちらも得られないモデルは credits を 0 として扱い `unknown_models` に載せる
+    （トークン数だけは計上する）。
+
+    NaN / ±inf のクレジット（`credits_est: NaN` のような台帳行）は合算せず `ignored` に
+    数える。合算してしまうと合計が NaN になり、`json.dumps` が JSON として不正な `NaN`
+    リテラルを書いて statusline の jq がキャッシュ全体を読めなくなる（🅒 も F も消える）。
+    """
+    by_model: dict = {}
+    total = 0.0
+    jobs = 0
+    ignored = 0
+    unknown: set = set()
+    for row in rows:
+        model = row.get("model") or "(unknown)"
+        usage = row.get("usage") or {}
+        u = normalize_codex_usage(usage) or {k: 0 for k in CODEX_USAGE_FIELDS}
+        est = row.get("credits_est")
+        credits: Optional[float]
+        if isinstance(est, (int, float)) and not isinstance(est, bool):
+            credits = float(est)
+        else:
+            credits = codex_credits_for(model, usage, pricing)
+        if credits is not None and not math.isfinite(credits):
+            # NaN / inf は集計に混ぜない（下流の JSON / jq を壊すため）
+            ignored += 1
+            continue
+        entry = by_model.setdefault(
+            model,
+            {"credits": 0.0, "jobs": 0, "output_tokens": 0, "input_tokens": 0, "known": True},
+        )
+        entry["jobs"] += 1
+        entry["output_tokens"] += u["output_tokens"]
+        entry["input_tokens"] += u["input_tokens"]
+        jobs += 1
+        if credits is None:
+            entry["known"] = False
+            unknown.add(model)
+            continue
+        entry["credits"] += credits
+        total += credits
+    return {
+        "credits": total,
+        "jobs": jobs,
+        "ignored": ignored,
+        "unknown_models": sorted(unknown),
+        "by_model": by_model,
+    }
+
+
+def fmt_credits(x) -> str:
+    """クレジットの表示（100 以上は整数、未満は小数1桁）。
+
+    1 ジョブあたりのクレジットは 1〜数十のオーダーになりうるため、小さい値で
+    小数1桁を残す（12.5 が "12" に丸められて読めなくなるのを避ける）。
+    """
+    v = float(x or 0)
+    return f"{v:,.0f}" if abs(v) >= 100 else f"{v:,.1f}"
 
 
 def append_report_log(entry: dict) -> None:

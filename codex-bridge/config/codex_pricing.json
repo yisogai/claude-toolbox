@@ -1,0 +1,22 @@
+{
+  "as_of": "2026-08-22",
+  "unit": "credits_per_mtok",
+  "models": {
+    "gpt-5.6-sol": {
+      "input": 100,
+      "cached_input": 10,
+      "output": 500,
+      "promo_until": "2026-11-21",
+      "list": { "input": 125, "cached_input": 12.5, "output": 750 }
+    },
+    "gpt-5.6-terra": { "input": 50, "cached_input": 5, "output": 300 },
+    "gpt-5.6-luna": { "input": 5, "cached_input": 0.5, "output": 30 }
+  },
+  "notes": [
+    "reasoning_output_tokens は output として計上 [未確認]",
+    "cache_write_input_tokens は input として計上 [未確認]",
+    "input_tokens は cached_input_tokens を内包すると解釈し、非キャッシュ入力 = input - cached で計算する [未確認]",
+    "reasoning_output_tokens は output_tokens に内包されると解釈し、二重計上しない [未確認]",
+    "gpt-5.6-sol は 2026-11-21 までの販促価格。定価相当は list を参照"
+  ]
+}

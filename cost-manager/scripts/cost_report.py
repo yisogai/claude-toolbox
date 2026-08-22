@@ -44,6 +44,61 @@ def _describe_scope(mode: str, sessions: list) -> str:
     return "session（" + ", ".join(parts) + "）"
 
 
+def _codex_summary(config, since_dt, until_dt, scope_mode: str, sessions: list):
+    """タスク範囲の Codex 使用量（codex-bridge の台帳）を集計する。台帳が無ければ None。
+
+    - `--scope session`（既定）: 対象セッション ID と `claude_session_id` が一致する行だけを拾う。
+      `claude_session_id` が null の行（env CLAUDE_CODE_SESSION_ID 無しで実行された Codex ジョブ）は
+      どのセッションにも帰属できないため対象外にし、件数を注記に出す。
+    - `--scope global`: セッションは見ず時間窓だけで拾う。
+    台帳は読むだけで書き込まない。0 件でも（無視行の注記を出すため）集計 dict を返す。
+    """
+    path = lib.codex_ledger_path(config)
+    if not path.exists():
+        return None
+
+    stats: dict = {}
+    rows = list(lib.iter_codex_ledger(path, since=since_dt, until=until_dt, stats=stats))
+
+    notes = []
+    if scope_mode != "global":
+        sids = {s.get("session_id") for s in sessions if s.get("session_id")}
+        kept = [r for r in rows if r.get("claude_session_id") in sids]
+        dropped = len(rows) - len(kept)
+        if dropped:
+            notes.append(
+                f"範囲内だが別セッション（または claude_session_id 未記録）の Codex ジョブ {dropped} 件は"
+                "除外しました（`--scope global` で時間窓のみの集計にできます）。"
+            )
+        rows = kept
+
+    out_of_window = stats.get("out_of_window", 0)
+    if out_of_window:
+        notes.append(
+            f"範囲外 {out_of_window} 件の Codex ジョブは集計していません（台帳には残っています）。"
+        )
+    if stats.get("unreadable"):
+        notes.append(f"台帳を読めませんでした: {path}")
+
+    agg = lib.aggregate_codex(rows, lib.load_codex_pricing())
+    if agg["unknown_models"]:
+        notes.append(
+            "codex_pricing.json 未収載かつ credits_est の無いモデルがあります"
+            "（クレジット 0 として扱いました）: " + ", ".join(agg["unknown_models"])
+        )
+    notes.append("クレジットは ChatGPT プランの概算です（reasoning/cache の課金区分は [未確認]）。")
+
+    return {
+        "credits": agg["credits"],
+        "jobs": agg["jobs"],
+        "by_model": agg["by_model"],
+        "unknown_models": agg["unknown_models"],
+        "ignored_rows": stats.get("ignored", 0) + agg["ignored"],
+        "ledger_path": str(path),
+        "notes": notes,
+    }
+
+
 def _resolve_sessions(active, args) -> list:
     if active and active.get("scope", {}).get("sessions"):
         return active["scope"]["sessions"]
@@ -171,8 +226,17 @@ def main():
     else:
         active_text = lib.fmt_duration(active_sec)
 
+    # Codex レーン（参考）。開始は表示用の開始と揃えるが、**終端は Claude 行と同じ until_dt**
+    # にする。end_display_utc は「最終 Claude アクティビティ」へ手前に補正されるため、それを
+    # 窓の終端にすると、その後に完了した Codex ジョブ（Claude 側は待っているだけで無活動）が
+    # 無注記で落ちる。
+    codex = _codex_summary(
+        config, start_display_utc, until_dt, scope_mode, sessions_for_desc
+    )
+
     meta = {
         "task_name": task_name,
+        "codex": codex,
         "date_jst": end_jst.strftime("%Y-%m-%d"),
         "start_jst": start_jst.strftime("%H:%M"),
         "end_jst": end_jst.strftime("%H:%M"),
@@ -217,6 +281,18 @@ def main():
             "unknown_models": report.unknown_models,
             "md_path": str(md_path),
             "png_path": str(png_path) if not args.no_image else None,
+            # Codex レーン（参考）。台帳が無ければ null、0 件なら jobs=0 で載る。
+            "codex": (
+                {
+                    "credits": codex["credits"],
+                    "jobs": codex["jobs"],
+                    "by_model": codex["by_model"],
+                    "unknown_models": codex["unknown_models"],
+                    "ignored_rows": codex["ignored_rows"],
+                    "ledger_path": codex["ledger_path"],
+                }
+                if codex else None
+            ),
         }
     )
 
@@ -235,6 +311,8 @@ def main():
             print(f"警告: {image_warn}")
     print(f"合計: ${lib.fmt_usd(report.total_usd, 2)} / ¥{lib.fmt_jpy(report.total_jpy)}")
     print(f"実処理時間: {active_text}")
+    if codex and codex["jobs"]:
+        print(f"Codex（参考）: {lib.fmt_credits(codex['credits'])}cr / {codex['jobs']} 件")
     if usd_jpy_warn:
         print(f"警告: {usd_jpy_warn}")
     dropped_no_ts = collect_stats.get("dropped_no_timestamp", 0)

@@ -1,0 +1,31 @@
+{
+  "effort": {
+    "fanout": "medium",
+    "implement": "medium",
+    "spec": "high",
+    "synthesize": "high",
+    "review": "xhigh",
+    "verify": "xhigh"
+  },
+  "review_by_pace": {
+    "enabled": true,
+    "source": "~/Documents/personal/tools/claude-toolbox/cost-manager/var/pace/cache.json",
+    "relaxed_below": 1.0,
+    "tight_above": 1.1,
+    "effort_when_tight": "high",
+    "max_age_sec": 1800
+  },
+  "parallel": {
+    "workflow_max_agents": 50,
+    "fanout_default": 8
+  },
+  "codex": {
+    "implement_model": "gpt-5.6-sol",
+    "implement_effort": "high",
+    "quick_model": "gpt-5.6-terra",
+    "quick_effort": "medium",
+    "review_model": "gpt-5.6-terra",
+    "review_effort": "high",
+    "max_parallel": 1
+  }
+}

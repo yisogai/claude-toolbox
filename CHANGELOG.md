@@ -1,5 +1,99 @@
 # Changelog
 
+## v2026.08.22 — Codex 併用準備: pace（週次枠ペーシング）・codex-bridge・model-policy tuning
+
+Codex（ChatGPT Pro）併用に向けた契約前準備。調査レポート・A/B 実験・ベースラインは `docs/research/` に置いた
+（`2026-08-22-claude-codex-collab.md` / `2026-08-22-opus-review-effort-ab.md` / `baseline-2026-08/`）。
+
+### codex-bridge（新規）
+
+- Claude Code（メイン／Workflow の opus ドライバ）から Codex CLI の `codex exec` を**非対話・構造化・タイムアウト付き**で
+  呼ぶ配管を新設した。`scripts/codex_run.py`（実行ドライバ: JSONL イベントのストリーミング、壁時計/アイドル
+  タイムアウトでプロセスグループ kill、`job.json`・使用量台帳 `var/codex_usage.jsonl` の生成、flock による並列スロット、
+  `OPENAI_API_KEY` の子環境からの除去、cmux シム除外のバイナリ解決）、`scripts/codex_job.py`（status / result / usage。
+  result は Fable 向けの圧縮サマリ）、`scripts/render_prompt.py`、`templates/`（`AGENTS.md.tmpl`・implement/review
+  プロンプト・review schema・推奨 `config.toml`）、`workflows/implement-review-loop.js`（実装 → 2 レーンレビュー →
+  修正ラウンド。停止条件は「直近 2 ラウンドで blocking+major が減らなければ人へ」）。
+- codex-plugin-cc は採用しない（2026-07-08 以降更新停止・6 コマンドがサブエージェントから呼べない・SessionStart hook が
+  Bash を壊す既知バグ）。`codex mcp-server` も 2026-08-20 に非推奨化。詳細は `docs/research/2026-08-22-claude-codex-collab.md`。
+- Codex 未導入でも配管全体をモック（`tests/mock_codex.py`、十数シナリオ）で検証できる。テスト 63 件。
+  実機（`gpt-5.6-sol` の受理・`--output-schema`・並列 2 での token_invalidated・usage 5 フィールド）は**未検証**で、
+  README の「実機検証チェックリスト」に列挙。
+- 反証レビュー（2 周）の指摘を反映: review-scope 時に stdin `-` を付けない（clap の ArgumentConflict）、非致命の
+  `error` item を failed 扱いしない、タイムアウト時に `stdout.close()` でブロックしない、修正ラウンドは `--resume <thread_id>`、
+  flock スロット、同一 job-dir 再利用時の残骸削除、SIGTERM/SIGHUP ハンドラ、`forced_login_method` の tomllib 判定、
+  モック実行を台帳に書かない、ほか。
+
+### model-policy
+
+- **調整ノブ（tuning）**を追加した。effort マトリクス・並列度・Codex 既定（モデル/effort）を `~/.claude/model-policy/tuning.json`
+  で持ち、cost-manager の pace キャッシュ（`seven_day.pace`）に連動して**レビュー/検証の effort を自動で切り替える**
+  （ペース < 1.0 → xhigh、≥ 1.1 → high）。根拠は A/B（`docs/research/2026-08-22-opus-review-effort-ab.md`: xhigh は実在バグ検出が
+  high の 1.5 倍・medium の 2.8 倍、nitpick は増えず、コスト 1.27x / 1.85x）。
+- CLI `model_policy.sh tune [effort <role> | set <key> <value> | init | reset]`、`status` 末尾に tuning 行、reminder hook（層4）に
+  ペース通知（セッションごとに状態が変わったときだけ 1 回注入）。テスト `tests/test_tune.sh`。
+- 反証レビューの指摘を反映: tuning ファイル由来の effort 値・文字列を語彙検証／サニタイズしてから注入文に使う
+  （プロジェクト側ファイルによるプロンプトインジェクション対策。プロジェクト側の `review_by_pace.source` は無視）、
+  `tune set` は葉キー・既定と同じ型のみ受理、書込失敗を exit 1 で報告、state 書込失敗時は再注入しない、ほか。
+- 稼働中スキル `~/.claude/skills/model-policy` への反映と CLAUDE.md への 1 行追記（案文は README §8）は**手動**。
+
+
+### cost-manager
+
+- 週次枠（`rate_limits.seven_day`）・5時間枠（`five_hour`）・Fable の 50% サブ枠の消化ペースを
+  statusline に常時表示する pace 機能を追加した。`scripts/pace_statusline.sh`（既存の
+  `license_statusline.sh` / `handoff_statusline.sh` を**無改変**で合成する wrapper。同期処理は
+  jq とファイル読みだけ）・`scripts/pace_refresh.py`（バックグラウンド集計）・
+  `scripts/pace_report.py`（人間向け CLI「ペース確認」）の3本。状態は `var/pace/`
+  （`samples.jsonl` / `cache.json` / `refresh.lock`）。
+- 集計は `cost_report.py --scope global` と同じ経路（`iter_transcripts(glob_all=True)` →
+  `collect_dedup_rows()` → `aggregate()`）を再利用し、dedup ロジックは複製していない。
+  Fable のシェアは USD 換算コスト比で推定する（**仮定 A1〜A3 はいずれも未検証**。
+  `docs/design.md` の「pace 実装」節に明記）。
+- **別ライセンスのセッションを除外**する。`license-switch` が生成した `.envrc`
+  （`generated-by: claude-toolbox/license-switch`）が効くディレクトリで起動したセッションは
+  別の週次枠の消費のため（`budget.pace.exclude_cwd_prefixes` による手動除外も可）。
+- refresh は `mkdir` ロックの single-flight（macOS に `flock` コマンドが無いことを実機確認したため
+  `flock` は使わない）。赤（早期枯渇）の判定はミニ仕様の式が `pace > 1` と同値で黄が到達不能に
+  なるため、`exhaust_margin_pct`（既定80）による読み替えにした。
+- `config/config.json` に `budget.pace`（`fable_cap_pct` / `refresh_ttl_sec` /
+  `sample_min_interval_sec` / `on_pace_band` / `exhaust_margin_pct` / `exclude_cwd_prefixes`）を追加。
+- `cost_lib.py` に pace 用の補助関数を追加（`pace_dir` / `pace_config` / `first_cwd_of` /
+  `is_license_switched_dir` / `row_cost_usd` / `is_fable_model` / `read_last_jsonl_line`）。
+  既存の dedup 系（`Accumulator` / `collect_dedup_rows` / `aggregate`）には変更なし
+  （`iter_usage` は開けないファイルを skip する例外処理のみ追加。抽出ロジックは同一）。
+- `tests/test_pace.py` を新設（98ケース）。合成 transcript + スクラッチルート隔離で、share/est/pace/
+  到達見込み、statusline の3系統の入力、samples のスロットル・壊れ行・空ファイル、single-flight、
+  10万行 samples、`resets_at` が過去（窓が閉じている）ケースを検証する。
+- `~/.claude/settings.json` の `statusLine` 切替は含めない（手動。README に手順）。
+- **Codex 使用量レーン**を追加した。codex-bridge の台帳 `codex-bridge/var/codex_usage.jsonl` を読み取り専用で集計し、statusline の `🅒` セグメント・`pace_report.py` の「Codex」節・`cost_report.py` のレポート「Codex（参考）」表に出す（台帳が無ければ既存表示と完全に同一。Codex の枠は絶対値非公開のため既定では % を出さず、`budget.pace.codex_weekly_credits` 設定時のみ % とペースを出す）。
+
+#### 反証レビュー指摘の修正（同日）
+
+- `pace_report.py`: `cache.json` の値が `null`（サンプル無し・集計失敗時）でもクラッシュしない
+  ようキー参照を正規化した（`.get(k, {})` は「キーがあって値が null」を既定値に置き換えない）。
+- **`pricing.json` 未収載モデルがあるときは Fable 推定を不能扱いにする**。従来は未収載の Fable が
+  USD 0 → シェア 0 → `F≈0%` と薄色で無警告表示され、「fable のまま使う余地あり」という逆の推奨が
+  出ていた。`cache.json` に `unknown_models` / `unknown_tokens` を持たせ、1 つでもあれば
+  `fable.share` / `est_pct` / `pace` を `null`、statusline は `F?!`（警告色）、`pace_report` は
+  推奨の代わりに「未収載モデルがあるため Fable 推定不能: …」を先頭に出す。
+- **refresh の失敗をネガティブキャッシュに残す**。`cache.json` の mtime だけで TTL を判定するため、
+  refresh がキャッシュを書かずに落ちると statusline 呼び出しごとに再起動し続けていた
+  （読めない `*.jsonl` 1 つ、`resets_at` のミリ秒値などで再現）。`main()` で全例外を捕まえて
+  `{"computed_at", "error"}` の最小キャッシュを atomic に書いて exit 1 する（statusline は `F!`）。
+- `cost_lib.iter_usage()`: 開けないファイル（権限なし等）は例外にせず 1 件 skip する。
+- サンプル検証を `_iter_samples()` に一本化した。最終行が無効（`resets_at: null` 等）でも手前の
+  有効サンプルで窓を決める。`resets_at` は `0 < x < 2**31` を満たすものだけ有効とする。
+- statusline は `used` と `resets_at` が**両方揃った窓だけ**を有効とし、揃わない窓は `null` で記録、
+  W が出せないときは `📅W ?` を出す（従来は出力が空文字になり、`resets_at: null` を記録していた）。
+- `exclude_cwd_prefixes` は `~` を展開し、末尾スラッシュを無視してディレクトリ境界で一致させる。
+- サンプル記録を `var/pace/sample.lock`（mkdir ロック、stale 60 秒）で直列化した。並行 statusline で
+  60 秒スロットルが破れていた（10 並列で 8 行）。ロックが取れなければ記録は諦める（best-effort）。
+- `pace_statusline.sh` の `SCRIPT_DIR` を bash だけで symlink 解決するようにした（symlink 配置時に
+  shell 側と python 側の `var/pace` が食い違っていた）。`refresh_ttl_sec` 等が非数値でも
+  stderr にエラーを漏らさず既定値へフォールバックする。
+- 未使用の `cost_lib.usage_token_total()` を削除した（`row_cost_usd()` と役割が重複していた）。
+
 ## v2026.08.14 — usage-report 新設・cost-manager 単価表更新
 
 ### usage-report（新規スキル）
