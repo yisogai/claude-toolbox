@@ -24,7 +24,7 @@ description: Claude Code から OpenAI Codex CLI（codex exec）を非対話・�
 
 2. **Codex を実行する**（長い。`run_in_background` で回し、`--timeout-sec` を明示する）
    ```bash
-   python3 …/codex-bridge/scripts/codex_run.py --mode task|review --job-dir <job-dir> \
+   python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_run.py --mode task|review --job-dir <job-dir> \
      --cd <対象リポジトリ> [--write] [--model gpt-5.6-sol|gpt-5.6-terra|gpt-5.6-luna] \
      [--effort minimal|low|medium|high|xhigh] --prompt-file /tmp/codex-prompt.md \
      [--schema …/templates/prompts/review.schema.json] \
@@ -38,9 +38,9 @@ description: Claude Code から OpenAI Codex CLI（codex exec）を非対話・�
 
 3. **結果を読む**
    ```bash
-   python3 …/codex-bridge/scripts/codex_job.py result <job-dir>          # 圧縮サマリ（既定）
-   python3 …/codex-bridge/scripts/codex_job.py status <job-dir>          # 実行中の進捗確認
-   python3 …/codex-bridge/scripts/codex_job.py result <job-dir> --json   # job.json 全体（必要なときだけ）
+   python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_job.py result <job-dir>          # 圧縮サマリ（既定）
+   python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_job.py status <job-dir>          # 実行中の進捗確認
+   python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_job.py result <job-dir> --json   # job.json 全体（必要なときだけ）
    ```
    - 使用量は `codex_job.py usage [--since 2026-08-01] [--json]`（「Codex の使用量」と言われたとき）。
 
