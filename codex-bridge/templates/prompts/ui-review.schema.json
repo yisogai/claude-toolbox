@@ -1,0 +1,27 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["summary", "findings"],
+  "properties": {
+    "summary": {
+      "type": "string",
+      "description": "全体所見。指摘が無い場合は、画像から問題が確認できなかった観点を書く"
+    },
+    "findings": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["severity", "viewport", "location", "issue", "impact", "suggestion"],
+        "properties": {
+          "severity": { "type": "string", "enum": ["Must", "Should", "Nice"] },
+          "viewport": { "type": "string", "description": "観察したビューポート" },
+          "location": { "type": "string", "description": "画面上の位置" },
+          "issue": { "type": "string", "description": "画像から確認できる問題" },
+          "impact": { "type": "string", "description": "利用者または画面理解への影響" },
+          "suggestion": { "type": "string", "description": "改善の方向性。具体的な実装命令は書かない" }
+        }
+      }
+    }
+  }
+}

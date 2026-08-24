@@ -75,7 +75,7 @@ job-dir を使い回しても前回の結果が今回のものとして残るこ
 
 | オプション | 既定 | 意味 |
 |---|---|---|
-| `--mode task\|review` | 必須 | 用途タグ（`job.json` / 台帳に残る） |
+| `--mode task\|review\|imagegen` | 必須 | 用途タグ（`job.json` / 台帳に残る）。`imagegen` は画像生成モード（下記） |
 | `--write` | off | 付けると `-s workspace-write`。無ければ `-s read-only` |
 | `--model` | `gpt-5.6-terra` | `gpt-5.6-sol` / `gpt-5.6-terra` / `gpt-5.6-luna` |
 | `--effort` | `high` | `-c model_reasoning_effort=<値>`（minimal…xhigh） |
@@ -87,9 +87,28 @@ job-dir を使い回しても前回の結果が今回のものとして残るこ
 | `--max-parallel` | 1 | `var/locks/` のスロット数。**上げない**（下記の落とし穴） |
 | `--allow-api-key` | off | `OPENAI_API_KEY` を子環境に残す（従量課金になる） |
 | `--mock <scenario>` | なし | 実機を使わず配管を回す（下記） |
+| `--image <path>` | なし | 入力画像（repeatable、最大4枚。png/jpg/jpeg/gif/webp）。argv には **`--image=` 結合形**で渡す（可変長 `-i` がプロンプトや stdin 指示 `-` を吸う事故の構造的回避）。darwin では長辺 2048px 超を `<job-dir>/images/` に自動縮小 |
+| `--out <path>` | なし | `imagegen` 専用・必須。絶対パスの `.png`。`--cd` 配下にあること（workspace-write は cd 配下にしか書けない） |
+| `--web-search` | off | `-c web_search="live"` を付与（`--review-scope` とは併用不可・警告して外す） |
 
 **終了コード**: `0`=completed / `2`=failed / `3`=timeout・idle_timeout / `4`=codex 不在・認証エラー /
 `1`=その他（error・killed・引数エラー）。
+
+### マルチモーダル・拡張（2026-08-24 追加。実測根拠は docs/research/2026-08-24-chatgpt-multimodal-usage.md）
+
+- **imagegen モード**: Codex 組み込みの image_gen ツール（`$imagegen`、gpt-image-2）で画像を生成し
+  `--out` に保存する。プロンプトは `$imagegen <指示>。…に保存して。` に自動合成。サンドボックスは
+  常に workspace-write、`--timeout-sec` 既定はこのモードのみ 600。turn.completed でも `--out` に
+  有効な PNG/JPEG が無ければ `~/.codex/generated_images/` から回収を試み、失敗なら status=failed に
+  降格する。`job.json` に `image: {path, bytes, width, height}` が載る。`--image` 併用で既存画像の
+  編集もできる。ChatGPT プラン枠を消費し（画像ターンはテキスト比 3〜5 倍速）、API キー不要。
+- **ui_screenshot.py**: headless Chrome で複数ビューポート（既定 1440x900 / 768x1024 / 375x812）を
+  直列撮影し、PNG 検証済みのパスを stdout に出す。終了コード 0=全成功 / 1=引数 / 2=全滅 /
+  3=一部成功 / 4=chrome 不在。UI レビューは ui-review / ui-compare テンプレート（+ schema）と
+  `--mode review --image …` で回す（運用ループは SKILL.md）。
+- **codex_cloud.py**: `codex cloud`（EXPERIMENTAL）の薄いラッパー。`submit --env <ENV_ID>
+  --attempts N`（best-of-N）→ `list --json` / `status` / `diff --attempt N` → `apply --yes`。
+  `--yes` なしの apply はドライラン。前提: ChatGPT 側で GitHub 連携とクラウド環境の作成。
 
 ---
 

@@ -30,6 +30,7 @@ import fcntl
 import json
 import os
 import re
+import shutil
 import signal
 import subprocess
 import sys
@@ -65,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
         prog="codex_run.py",
         description="codex exec を非対話で実行し、job.json にまとめる",
     )
-    p.add_argument("--mode", choices=("task", "review"), required=True, help="実行モード")
+    p.add_argument("--mode", choices=("task", "review", "imagegen"), required=True, help="実行モード")
     p.add_argument("--job-dir", required=True, help="成果物（events.jsonl / last.md / job.json）の出力先")
     p.add_argument("--cd", default=None, help="Codex の作業ディレクトリ（既定: カレント）")
     p.add_argument("--model", default="gpt-5.6-terra", choices=MODELS, help="モデル（既定 gpt-5.6-terra）")
@@ -74,7 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--prompt-file", default=None, help="プロンプトのファイル")
     p.add_argument("--prompt", default=None, help="プロンプト文字列")
     p.add_argument("--schema", default=None, help="--output-schema に渡す JSON Schema のパス")
-    p.add_argument("--timeout-sec", type=float, default=3600.0, help="壁時計タイムアウト秒（既定 3600）")
+    p.add_argument("--image", action="append", default=[], help="入力画像（最大4枚）")
+    p.add_argument("--out", default=None, help="imagegen の出力 PNG（絶対パス）")
+    p.add_argument("--web-search", action="store_true", help="Web 検索を live モードで許可")
+    p.add_argument("--timeout-sec", type=float, default=None,
+                   help="壁時計タイムアウト秒（既定: imagegen 600、それ以外 3600）")
     p.add_argument("--idle-timeout-sec", type=float, default=600.0, help="無イベント許容秒（既定 600）")
     p.add_argument("--resume-last", action="store_true", help="直前スレッドを再開（exec resume --last）")
     p.add_argument("--resume", default=None, help="指定 thread_id を再開（exec resume <ID>）")
@@ -398,7 +403,13 @@ def build_codex_argv(args, binary: list[str], cd: str, last_md: Path,
     argv += ["-C", cd]
     argv += ["-m", args.model]
     argv += ["-c", f"model_reasoning_effort={args.effort}"]
-    argv += ["-s", "workspace-write" if args.write else "read-only"]
+    argv += ["-s", "workspace-write" if args.write or args.mode == "imagegen" else "read-only"]
+    if args.web_search:
+        if args.review_scope:
+            warns.append("--review-scope 指定のため --web-search は付けなかった")
+        else:
+            # 値の引用符も引数に含め、TOML の文字列として解釈させる。
+            argv += ["-c", 'web_search="live"']
     if args.schema:
         if args.review_scope:
             # L14: exec review は --output-schema を無視する。付けずに警告する
@@ -425,6 +436,10 @@ def build_codex_argv(args, binary: list[str], cd: str, last_md: Path,
         argv += ["resume", "--last"]
     elif args.resume:
         argv += ["resume", args.resume]
+    # `--image <FILE>...` は可変長引数なので、次の `-`（stdin 指示）を画像として
+    # 吸い込ませないよう、画像ごとに必ず `=` 結合形を用いる。
+    for image in getattr(args, "actual_images", args.image):
+        argv += [f"--image={image}"]
     argv += ["-"]  # プロンプトは stdin（非 TTY で空出力になる既知問題 #19945 の回避）
     return argv
 
@@ -435,6 +450,176 @@ def decode_prompt(raw: bytes, source: str, warnings: list[str]) -> str:
     if "\ufffd" in text:
         warnings.append(f"プロンプト（{source}）に不正な UTF-8 があったため置換して読み込んだ")
     return text
+
+
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp"}
+PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
+
+
+def image_magic(path: Path) -> str | None:
+    """PNG / JPEG のマジックバイトを返す。出力画像の完了判定にも使う。"""
+    try:
+        head = path.read_bytes()[:24]
+    except OSError:
+        return None
+    if head.startswith(PNG_SIGNATURE):
+        return "png"
+    if head.startswith(b"\xff\xd8\xff"):
+        return "jpeg"
+    return None
+
+
+def image_dimensions(path: Path) -> tuple[int, int] | None:
+    """PNG IHDR / JPEG SOF0・SOF2 から幅高さを読む（外部依存なし）。"""
+    try:
+        data = path.read_bytes()
+    except OSError:
+        return None
+    if data.startswith(PNG_SIGNATURE) and len(data) >= 24 and data[12:16] == b"IHDR":
+        return int.from_bytes(data[16:20], "big"), int.from_bytes(data[20:24], "big")
+    if not data.startswith(b"\xff\xd8"):
+        return None
+    i = 2
+    while i + 4 <= len(data):
+        if data[i] != 0xFF:
+            i += 1
+            continue
+        while i < len(data) and data[i] == 0xFF:
+            i += 1
+        if i >= len(data):
+            break
+        marker = data[i]
+        i += 1
+        if marker in (0xD8, 0xD9, 0x01) or 0xD0 <= marker <= 0xD7:
+            continue
+        if i + 2 > len(data):
+            break
+        length = int.from_bytes(data[i:i + 2], "big")
+        if length < 2 or i + length > len(data):
+            break
+        if marker in (0xC0, 0xC2) and length >= 7:
+            return (int.from_bytes(data[i + 5:i + 7], "big"),
+                    int.from_bytes(data[i + 3:i + 5], "big"))
+        i += length
+    return None
+
+
+def sips_dimensions(path: Path) -> tuple[int, int] | None:
+    """sips が扱える画像の寸法を取得する。失敗時は None。"""
+    try:
+        result = subprocess.run(
+            ["/usr/bin/sips", "-g", "pixelWidth", "-g", "pixelHeight", str(path)],
+            capture_output=True, text=True, timeout=15, check=False)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    values = dict(re.findall(r"pixel(Width|Height):\s*(\d+)", result.stdout))
+    try:
+        return int(values["Width"]), int(values["Height"])
+    except (KeyError, ValueError):
+        return None
+
+
+def prepare_images(args, job_dir: Path, warnings: list[str]) -> list[str] | None:
+    """入力画像を検証し、darwin では必要なら job-dir に縮小コピーを作る。"""
+    supplied = args.image
+    if len(supplied) > 4:
+        lib.eprint("エラー: --image は最大4枚まで指定できます")
+        return None
+    resolved: list[Path] = []
+    for raw in supplied:
+        path = Path(raw).expanduser().resolve()
+        if not path.is_file():
+            lib.eprint(f"エラー: --image のファイルがありません: {path}")
+            return None
+        if path.suffix.lower() not in IMAGE_EXTENSIONS:
+            lib.eprint(f"エラー: --image は png/jpg/jpeg/gif/webp のみ指定できます: {path}")
+            return None
+        resolved.append(path)
+
+    if not resolved:
+        return []
+    can_sips = sys.platform == "darwin" and os.path.isfile("/usr/bin/sips") \
+        and os.access("/usr/bin/sips", os.X_OK)
+    actual: list[str] = []
+    for index, path in enumerate(resolved, start=1):
+        if not can_sips:
+            reason = "darwin 以外" if sys.platform != "darwin" else "/usr/bin/sips が使えない"
+            warnings.append(f"{reason} のため画像を原本のまま渡す: {path}")
+            actual.append(str(path))
+            continue
+        dimensions = sips_dimensions(path)
+        if dimensions is None:
+            warnings.append(f"sips で画像サイズを取得できないため原本のまま渡す: {path}")
+            actual.append(str(path))
+            continue
+        if max(dimensions) <= 2048:
+            actual.append(str(path))
+            continue
+        destination = job_dir / "images" / f"{index}-{path.name}"
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            result = subprocess.run(
+                ["/usr/bin/sips", "--resampleHeightWidthMax", "2048", str(path), "--out", str(destination)],
+                capture_output=True, text=True, timeout=120, check=False)
+        except (OSError, subprocess.SubprocessError) as e:
+            warnings.append(f"sips で画像を縮小できないため原本のまま渡す: {path} ({e})")
+            actual.append(str(path))
+            continue
+        if result.returncode != 0 or not destination.is_file():
+            detail = result.stderr.strip() if result.returncode != 0 else "出力ファイルがない"
+            warnings.append(f"sips で画像を縮小できないため原本のまま渡す: {path} ({detail})")
+            actual.append(str(path))
+            continue
+        warnings.append(f"長辺が 2048px を超えるため画像を縮小して渡す: {path} → {destination}")
+        actual.append(str(destination.resolve()))
+    return actual
+
+
+def imagegen_prompt(prompt: str, out: Path) -> str:
+    return (f"$imagegen {prompt}。生成した画像を {out} に PNG で保存して。"
+            "組み込みの image_gen ツールを使い、OPENAI_API_KEY を要する CLI フォールバックは使わないこと。")
+
+
+def output_image_payload(out: Path, warnings: list[str]) -> dict:
+    """imagegen 出力の job.json 用メタデータを作る。読取不能でも path は残す。"""
+    payload = {"path": str(out), "bytes": None, "width": None, "height": None}
+    try:
+        payload["bytes"] = out.stat().st_size
+    except OSError:
+        return payload
+    dimensions = image_dimensions(out)
+    if dimensions is None:
+        warnings.append(f"生成画像の幅・高さを PNG IHDR / JPEG SOF0・SOF2 から取得できなかった: {out}")
+    else:
+        payload["width"], payload["height"] = dimensions
+    return payload
+
+
+def recover_generated_image(out: Path, started_epoch: float, warnings: list[str]) -> bool:
+    """組み込み image_gen の既定保存先から、今回以降の最新画像を回収する。"""
+    root = lib.codex_home() / "generated_images"
+    candidates: list[Path] = []
+    try:
+        for path in root.rglob("*"):
+            if path.is_file() and path.suffix.lower() in {".png", ".jpg", ".jpeg"} \
+                    and path.stat().st_mtime >= started_epoch and image_magic(path) is not None:
+                candidates.append(path)
+    except OSError as e:
+        warnings.append(f"generated_images を走査できなかった: {e}")
+        return False
+    if not candidates:
+        return False
+    source = max(candidates, key=lambda path: path.stat().st_mtime)
+    try:
+        out.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(source, out)
+    except OSError as e:
+        warnings.append(f"generated_images から画像を回収できなかった: {e}")
+        return False
+    warnings.append(f"--out に画像が無かったため generated_images から回収した: {source} → {out}")
+    return True
 
 
 def child_env(args, warnings: list[str]) -> dict:
@@ -552,6 +737,8 @@ def base_payload(args, cd: str, started, ended, status: str, queued_sec: float =
         "commands": [],
         "last_message_path": None,
         "structured_output": None,
+        "images": list(getattr(args, "actual_images", [])),
+        "image": None,
         "errors": [],
         "warnings": [],
     }
@@ -654,6 +841,10 @@ def install_signal_handlers(ctx: dict) -> None:
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
 
+    # argparse の既定を None にし、既存モードの 3600 秒は維持しつつ imagegen だけ短くする。
+    if args.timeout_sec is None:
+        args.timeout_sec = 600.0 if args.mode == "imagegen" else 3600.0
+
     if args.resume_last and args.resume:
         lib.eprint("エラー: --resume-last と --resume は同時に指定できません")
         return 1
@@ -663,6 +854,25 @@ def main(argv=None) -> int:
     if args.review_scope and args.review_scope != "uncommitted" \
             and not (args.review_scope.startswith("base:") or args.review_scope.startswith("commit:")):
         lib.eprint("エラー: --review-scope は uncommitted | base:<ref> | commit:<sha> のいずれか")
+        return 1
+    if args.image and args.review_scope:
+        lib.eprint("エラー: --image と --review-scope は同時に指定できません")
+        return 1
+    if args.mode == "imagegen":
+        if not args.out:
+            lib.eprint("エラー: --mode imagegen では --out が必須です")
+            return 1
+        supplied_out = Path(args.out)
+        raw_out = supplied_out.expanduser()
+        if not supplied_out.is_absolute() or raw_out.suffix != ".png":
+            lib.eprint("エラー: imagegen の --out は絶対パスの .png ファイルで指定してください")
+            return 1
+        if args.resume_last or args.resume or args.review_scope or args.schema:
+            lib.eprint("エラー: --mode imagegen は resume 系 / --review-scope / --schema と併用できません")
+            return 1
+        args.out_path = raw_out.resolve()
+    elif args.out:
+        lib.eprint("エラー: --out は --mode imagegen でのみ指定できます")
         return 1
 
     if args.schema:
@@ -687,10 +897,17 @@ def main(argv=None) -> int:
         lib.eprint(f"エラー: job-dir を作成できません: {e}")
         return 1
 
-    cd = str(Path(args.cd).expanduser().resolve()) if args.cd else os.getcwd()
+    cd = str(Path(args.cd).expanduser().resolve()) if args.cd else \
+        (str(args.out_path.parent) if args.mode == "imagegen" else os.getcwd())
     if not os.path.isdir(cd):
         lib.eprint(f"エラー: --cd が存在しません: {cd}")
         return 1
+    if args.mode == "imagegen":
+        try:
+            args.out_path.relative_to(Path(cd).resolve())
+        except ValueError:
+            lib.eprint("エラー: imagegen の --out は --cd 配下に置く必要があります")
+            return 1
 
     # プロンプト取得（引数 > ファイル > stdin）
     # M-4: 不正な UTF-8 でも traceback にせず、置換して読んだことを warnings に残す
@@ -718,8 +935,17 @@ def main(argv=None) -> int:
         lib.eprint("エラー: --prompt / --prompt-file / stdin のいずれかでプロンプトを渡してください")
         return 1
 
-    started = lib.now_utc()
     warnings = config_warnings() + prompt_warnings
+
+    job_dir = Path(args.job_dir).expanduser().resolve()
+    prepared_images = prepare_images(args, job_dir, warnings)
+    if prepared_images is None:
+        return 1
+    args.actual_images = prepared_images
+    if args.mode == "imagegen":
+        prompt = imagegen_prompt(prompt, args.out_path)
+
+    started = lib.now_utc()
 
     # M8: 上位から止められても job.json / ロック / 子プロセスの後始末をする
     ctx = {"args": args, "cd": cd, "job_dir": job_dir, "warnings": warnings,
@@ -899,6 +1125,15 @@ def main(argv=None) -> int:
         if tail:
             col.errors.append(f"stderr（末尾 {STDERR_TAIL_CHARS} 字まで）:\n{tail}")
 
+    # imagegen は turn.completed だけでは成功にしない。Codex の組み込みツールが標準保存先に
+    # 取り残した場合は、今回の開始時刻以降で最も新しい画像を --out に回収してから検証する。
+    if args.mode == "imagegen" and status == "completed":
+        if image_magic(args.out_path) is None:
+            recover_generated_image(args.out_path, started.timestamp(), warnings)
+        if image_magic(args.out_path) is None:
+            status = "failed"
+            col.errors.append(f"imagegen は turn.completed したが、有効な PNG / JPEG を --out に取得できなかった: {args.out_path}")
+
     if col.commands_dropped:
         col.warn(f"実行コマンドが多いため成功分 {col.commands_dropped} 件を記録から切り捨てた"
                  f"（上限 {MAX_COMMANDS} 件）")
@@ -917,6 +1152,8 @@ def main(argv=None) -> int:
     payload["errors"] = col.errors
     payload["warnings"] = warnings + col.warnings
     payload["job_dir"] = str(job_dir)
+    if args.mode == "imagegen":
+        payload["image"] = output_image_payload(args.out_path, payload["warnings"])
 
     # --- last.md（空なら agent_message から復元。#19945 の空出力対策） ---
     try:

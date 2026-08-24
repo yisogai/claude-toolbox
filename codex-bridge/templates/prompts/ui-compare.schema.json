@@ -1,0 +1,28 @@
+{
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["verdict", "resolved", "regressions", "notes"],
+  "properties": {
+    "verdict": {
+      "type": "string",
+      "enum": ["improved", "regressed", "mixed", "unchanged"]
+    },
+    "resolved": {
+      "type": "array",
+      "items": { "type": "string" }
+    },
+    "regressions": {
+      "type": "array",
+      "items": {
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["location", "issue"],
+        "properties": {
+          "location": { "type": "string", "description": "画面上の位置と対象ビューポート" },
+          "issue": { "type": "string", "description": "after で新たに確認できる退行" }
+        }
+      }
+    },
+    "notes": { "type": "string", "description": "相対比較の補足" }
+  }
+}

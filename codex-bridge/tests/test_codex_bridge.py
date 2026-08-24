@@ -30,6 +30,7 @@ SCRIPTS = REPO / "scripts"
 RUN = SCRIPTS / "codex_run.py"
 JOB = SCRIPTS / "codex_job.py"
 RENDER = SCRIPTS / "render_prompt.py"
+UI_SCREENSHOT = SCRIPTS / "ui_screenshot.py"
 
 sys.path.insert(0, str(SCRIPTS))
 import codex_lib as lib  # noqa: E402
@@ -1323,6 +1324,236 @@ class TestLedgerNonMock(Base):
             self.assertEqual(len(self.ledger()), 1)
         finally:
             os.environ.pop("CODEX_BRIDGE_ROOT", None)
+
+
+class TestImageAndWebSearch(Base):
+    """画像入力・imagegen・web search の Codex CLI 配線をモックで検証する。"""
+
+    @staticmethod
+    def png(width=1, height=1):
+        # IHDR まであれば本実装のマジックバイト・寸法パースを検証できる。
+        return (b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR" + width.to_bytes(4, "big")
+                + height.to_bytes(4, "big") + b"\x08\x06\x00\x00\x00")
+
+    def input_image(self, name="input.png"):
+        path = self.tmp / name
+        path.write_bytes(self.png())
+        return path
+
+    def test_image_argv_uses_equals_form_for_multiple_and_resume(self):
+        import codex_run
+        one, two = self.input_image("one.png").resolve(), self.input_image("two.PNG").resolve()
+        args = codex_run.build_parser().parse_args(
+            ["--mode", "task", "--job-dir", str(self.tmp / "job"), "--prompt", "x",
+             "--resume", "th_1", "--image", str(one), "--image", str(two)])
+        args.actual_images = [str(one), str(two)]
+        argv = codex_run.build_codex_argv(args, ["/bin/codex"], str(self.cd), self.tmp / "last.md", [])
+        self.assertEqual(argv[argv.index("resume"):],
+                         ["resume", "th_1", f"--image={one}", f"--image={two}", "-"])
+        self.assertNotIn("--image", argv)
+
+    def test_image_validation_rejects_invalid_inputs(self):
+        missing = self.run_job("ok", extra_args=["--image", str(self.tmp / "missing.png")])
+        self.assertEqual(missing[0].returncode, 1)
+        invalid = self.tmp / "input.txt"
+        invalid.write_text("not an image", encoding="utf-8")
+        bad_extension = self.run_job("ok", extra_args=["--image", str(invalid)])
+        self.assertEqual(bad_extension[0].returncode, 1)
+        images = [self.input_image(f"many-{n}.png") for n in range(5)]
+        too_many = self.run_job("ok", extra_args=sum((["--image", str(path)] for path in images), []))
+        self.assertEqual(too_many[0].returncode, 1)
+        review = self.run_job("ok", mode="review", extra_args=[
+            "--review-scope", "uncommitted", "--image", str(images[0])])
+        self.assertEqual(review[0].returncode, 1)
+
+    def test_task_image_is_recorded_in_job_payload(self):
+        image = self.input_image()
+        proc, job_dir = self.run_job("ok", extra_args=["--image", str(image)])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        job = self.load(job_dir)
+        self.assertEqual(job["images"], [str(image.resolve())])
+        self.assertIsNone(job["image"])
+
+    def test_imagegen_prompt_is_written_to_stdin_and_uses_workspace_write(self):
+        import codex_run
+        out = (self.cd / "generated.png").resolve()
+        script = self.tmp / "capture_codex.py"
+        script.write_text(
+            "#!/usr/bin/env python3\n"
+            "import json, pathlib, sys\n"
+            "args = sys.argv[1:]\n"
+            "cd = args[args.index('-C') + 1]\n"
+            "pathlib.Path(cd, 'CAPTURED_ARGV.json').write_text(json.dumps(args), encoding='utf-8')\n"
+            "pathlib.Path(cd, 'CAPTURED_STDIN.txt').write_text(sys.stdin.read(), encoding='utf-8')\n"
+            "out = args[args.index('-o') + 1]\n"
+            "pathlib.Path(out).write_text('mock last', encoding='utf-8')\n"
+            "print(json.dumps({'type': 'thread.started', 'thread_id': 'th_capture'}))\n"
+            "print(json.dumps({'type': 'turn.completed'}))\n",
+            encoding="utf-8")
+        script.chmod(0o755)
+        proc = subprocess.run(
+            [sys.executable, str(RUN), "--mode", "imagegen", "--job-dir", str(self.tmp / "imagegen"),
+             "--out", str(out), "--prompt", "夕焼けの海", "--codex-bin", str(script)],
+            capture_output=True, text=True, env=self.env(), timeout=120)
+        self.assertEqual(proc.returncode, 2, proc.stderr)  # 出力画像が無いので意図どおり failed に降格
+        self.assertEqual((self.cd / "CAPTURED_STDIN.txt").read_text(encoding="utf-8"),
+                         codex_run.imagegen_prompt("夕焼けの海", out))
+        captured_argv = json.loads((self.cd / "CAPTURED_ARGV.json").read_text(encoding="utf-8"))
+        self.assertEqual(captured_argv[captured_argv.index("-C") + 1], str(out.parent))
+        args = codex_run.build_parser().parse_args(
+            ["--mode", "imagegen", "--job-dir", str(self.tmp / "argjob"), "--out", str(out), "--prompt", "x"])
+        argv = codex_run.build_codex_argv(args, ["/bin/codex"], str(self.cd), self.tmp / "last.md", [])
+        self.assertEqual(argv[argv.index("-s") + 1], "workspace-write")
+        self.assertEqual(args.timeout_sec, None)
+
+    def test_imagegen_recovers_generated_image_and_records_metadata(self):
+        out = self.cd / "recovered.png"
+        source = self.codex_home / "generated_images" / "thread" / "x.png"
+        source.parent.mkdir(parents=True)
+        source.write_bytes(self.png(12, 34))
+        # 開始時刻以降という回収条件に合わせ、モック起動時より後の mtime を与える。
+        future = time.time() + 30
+        os.utime(source, (future, future))
+        proc, job_dir = self.run_job("ok", mode="imagegen", extra_args=["--out", str(out)])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        job = self.load(job_dir)
+        self.assertEqual(job["status"], "completed")
+        self.assertEqual(job["image"], {"path": str(out.resolve()), "bytes": len(self.png(12, 34)),
+                                         "width": 12, "height": 34})
+        self.assertTrue(any("generated_images から回収" in w for w in job["warnings"]), job["warnings"])
+
+    def test_imagegen_without_output_image_is_failed(self):
+        out = self.cd / "missing-output.png"
+        proc, job_dir = self.run_job("ok", mode="imagegen", extra_args=["--out", str(out)])
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        job = self.load(job_dir)
+        self.assertEqual(job["status"], "failed")
+        self.assertTrue(any("有効な PNG / JPEG" in e for e in job["errors"]), job["errors"])
+        self.assertEqual(job["image"]["path"], str(out.resolve()))
+
+    def test_imagegen_option_validation(self):
+        import codex_run
+        self.assertEqual(codex_run.main(["--mode", "imagegen", "--job-dir", str(self.tmp / "a"),
+                                         "--prompt", "x"]), 1)
+        self.assertEqual(codex_run.main(["--mode", "imagegen", "--job-dir", str(self.tmp / "b"),
+                                         "--out", "relative.png", "--prompt", "x"]), 1)
+        self.assertEqual(codex_run.main(["--mode", "task", "--job-dir", str(self.tmp / "c"),
+                                         "--out", str(self.cd / "x.png"), "--prompt", "x"]), 1)
+        self.assertEqual(codex_run.main(["--mode", "imagegen", "--job-dir", str(self.tmp / "d"),
+                                         "--out", str(self.cd / "x.png"), "--resume-last", "--prompt", "x"]), 1)
+
+    def test_web_search_argv_and_review_scope_warning(self):
+        import codex_run
+        args = codex_run.build_parser().parse_args(
+            ["--mode", "task", "--job-dir", str(self.tmp / "a"), "--prompt", "x", "--web-search"])
+        argv = codex_run.build_codex_argv(args, ["/bin/codex"], str(self.cd), self.tmp / "last.md", [])
+        index = argv.index("web_search=\"live\"")
+        self.assertEqual(argv[index - 1], "-c")
+        review = codex_run.build_parser().parse_args(
+            ["--mode", "review", "--job-dir", str(self.tmp / "b"), "--prompt", "x",
+             "--review-scope", "uncommitted", "--web-search"])
+        warnings = []
+        review_argv = codex_run.build_codex_argv(review, ["/bin/codex"], str(self.cd),
+                                                  self.tmp / "last.md", warnings)
+        self.assertNotIn("web_search=\"live\"", review_argv)
+        self.assertTrue(any("web-search" in warning for warning in warnings), warnings)
+
+
+class TestUiScreenshot(Base):
+    PNG = b"\x89PNG\r\n\x1a\n"
+
+    def screenshot(self, argv):
+        return subprocess.run([sys.executable, str(UI_SCREENSHOT)] + argv,
+                              capture_output=True, text=True, env=self.env(), timeout=60)
+
+    def fake_chrome(self, name: str, writes_png: bool) -> Path:
+        script = self.tmp / name
+        body = [
+            "#!/usr/bin/env python3",
+            "import pathlib, sys",
+            "output = next(arg.split('=', 1)[1] for arg in sys.argv if arg.startswith('--screenshot='))",
+        ]
+        if writes_png:
+            body.append("pathlib.Path(output).write_bytes(b'\\x89PNG\\r\\n\\x1a\\n')")
+        body.append("sys.exit(0)")
+        script.write_text("\n".join(body) + "\n", encoding="utf-8")
+        script.chmod(0o755)
+        return script
+
+    def test_url_html_are_exclusive_and_required(self):
+        out = self.tmp / "shots"
+        missing = self.screenshot(["--out-dir", str(out)])
+        both = self.screenshot(["--url", "https://example.test", "--html", str(self.tmp / "x.html"),
+                                "--out-dir", str(out)])
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        self.assertEqual(both.returncode, 1, both.stderr)
+
+    def test_invalid_viewports_exit1(self):
+        proc = self.screenshot(["--url", "https://example.test", "--out-dir", str(self.tmp / "shots"),
+                                "--viewports", "1440-by-900"])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("ビューポート", proc.stderr)
+
+    def test_nonexistent_chrome_exit4(self):
+        proc = self.screenshot(["--url", "https://example.test", "--out-dir", str(self.tmp / "shots"),
+                                "--chrome-bin", str(self.tmp / "missing-chrome")])
+        self.assertEqual(proc.returncode, 4, proc.stderr)
+
+    def test_fake_chrome_without_png_exits2(self):
+        chrome = self.fake_chrome("chrome-no-png.py", writes_png=False)
+        proc = self.screenshot(["--url", "https://example.test", "--out-dir", str(self.tmp / "shots"),
+                                "--chrome-bin", str(chrome), "--viewports", "100x200"])
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        self.assertEqual(proc.stdout, "")
+
+    def test_fake_chrome_with_png_exits0_and_prints_path(self):
+        chrome = self.fake_chrome("chrome-png.py", writes_png=True)
+        out = self.tmp / "shots"
+        proc = self.screenshot(["--url", "https://example.test", "--out-dir", str(out),
+                                "--chrome-bin", str(chrome), "--viewports", "100x200"])
+        expected = (out / "shot-100x200.png").resolve()
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(proc.stdout.splitlines(), [str(expected)])
+        self.assertEqual(expected.read_bytes(), self.PNG)
+
+    def test_fake_chrome_partial_success_exits3(self):
+        chrome = self.tmp / "chrome-partial.py"
+        chrome.write_text(
+            "#!/usr/bin/env python3\n"
+            "import pathlib, sys\n"
+            "output = next(a.split('=', 1)[1] for a in sys.argv if a.startswith('--screenshot='))\n"
+            "if output.endswith('100x200.png'):\n"
+            "    pathlib.Path(output).write_bytes(b'\\x89PNG\\r\\n\\x1a\\n')\n",
+            encoding="utf-8")
+        chrome.chmod(0o755)
+        proc = self.screenshot([
+            "--url", "https://example.test", "--out-dir", str(self.tmp / "shots"),
+            "--chrome-bin", str(chrome), "--viewports", "100x200,300x400",
+        ])
+        self.assertEqual(proc.returncode, 3, proc.stderr)
+        self.assertEqual(len(proc.stdout.splitlines()), 1)
+
+
+class TestUiPromptTemplates(Base):
+    def render(self, argv):
+        return subprocess.run([sys.executable, str(RENDER)] + argv,
+                              capture_output=True, text=True, env=self.env(), timeout=60)
+
+    def test_ui_review_template_resolves_and_requires_placeholders(self):
+        ok = self.render(["ui-review", "--set", "CONTEXT=x", "--set", "FOCUS=y"])
+        missing = self.render(["ui-review", "--set", "CONTEXT=x"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertNotIn("{{", ok.stdout)
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        self.assertIn("FOCUS", missing.stderr)
+
+    def test_ui_compare_template_resolves_and_requires_placeholders(self):
+        ok = self.render(["ui-compare", "--set", "CHANGES=x"])
+        missing = self.render(["ui-compare"])
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        self.assertNotIn("{{", ok.stdout)
+        self.assertEqual(missing.returncode, 1, missing.stderr)
+        self.assertIn("CHANGES", missing.stderr)
 
 
 if __name__ == "__main__":
