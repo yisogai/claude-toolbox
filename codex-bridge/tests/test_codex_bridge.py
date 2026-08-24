@@ -986,8 +986,10 @@ class TestUsageResumeAccounting(Base):
         ]
 
     def test_resumed_row_counted_as_delta(self):
+        # 差分計上ロジックの検証なのでモードを明示する（同梱 config の既定は実機検証の結果で
+        # per_turn に切り替わっており、未固定だと config の値に依存して揺れる）
         self.write_rows(self.cumulative_rows())
-        r = self.job_cli(["usage", "--json"])
+        r = self.job_cli(["usage", "--json", "--usage-mode", "cumulative"])
         self.assertEqual(r.returncode, 0, r.stderr)
         m = json.loads(r.stdout)["by_model"]["gpt-5.6-terra"]
         self.assertEqual(m["input"], 25000, "resume 行が二重計上されている")
@@ -1241,7 +1243,9 @@ class TestWorkflowTemplate(Base):
         if not node:
             self.skipTest("node が無い")
         # `export const X = …` を globalThis への代入に変えて、Workflow 本体を関数として実行する
-        src = self.js.replace("export const ", "globalThis.")
+        src = self.js.replace("export const ", "globalThis.").replace(
+            "const buildCodexCmd", "globalThis.buildCodexCmd"
+        )
         arg = "null" if thread_id is None else json.dumps(thread_id)
         harness = self.tmp / "eval_build_cmd.cjs"
         harness.write_text(

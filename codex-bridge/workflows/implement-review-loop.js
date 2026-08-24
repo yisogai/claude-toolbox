@@ -42,8 +42,10 @@ const runCodexCmd = (round, lane, extra) =>
 
 // 実装レーンのコマンド組み立て。**純関数**にしてあるのは、テストが node で実際に評価して
 // 「修正ラウンドが --resume <実装スレッド> になっているか」を検証するため（文字列 grep だと
-// 行の切れ目で見逃す）。Workflow ランタイムでは単なる追加 export として無害。
-export const buildCodexCmd = (round, implThreadId) =>
+// 行の切れ目で見逃す）。
+// 注意: `export` にしないこと。Workflow ランタイムは `export const meta` 以外の export を
+// SyntaxError（Unexpected keyword 'export'）で拒否する（実機 2026-08-24 確認）。
+const buildCodexCmd = (round, implThreadId) =>
   runCodexCmd(round, 'impl',
     `--mode task --write --model gpt-5.6-terra --effort high --prompt-file /tmp/codex-prompt.md` +
     (round === 1 ? '' : ` --resume ${implThreadId}`))
