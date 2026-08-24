@@ -18,7 +18,8 @@ best-of-N（`--attempts N`）の実装委譲をクラウド側に投げ、生成
 実行例:
   # best-of-3 で投げる（ENV_ID は `codex cloud` の TUI で確認する）
   # ENV_ID は Codex Web の環境設定 URL 末尾の 32 桁 hex（例: 6a8c4ba225d08191a0b1f440d06bcbdc）。
-  # --env 省略時は $CODEX_BRIDGE_CLOUD_ENV → var/cloud.json の env_id の順で既定値を使う。
+  # --env 省略時は $CODEX_BRIDGE_CLOUD_ENV → cloud.json の environments[GitHub slug] →
+  # env_id の順で既定値を使う。slug は --cd（既定: カレント）の origin remote から得る。
   python3 codex_cloud.py submit --attempts 3 --prompt-file prompt.md
   python3 codex_cloud.py list --json
   python3 codex_cloud.py status task_xyz
@@ -83,7 +84,9 @@ def build_parser() -> argparse.ArgumentParser:
     # -- submit ----------------------------------------------------------
     s = sub.add_parser("submit", help="クラウドにタスクを投げる（codex cloud exec）")
     s.add_argument("--env", default=None,
-               help="対象の環境 ID（省略時: $CODEX_BRIDGE_CLOUD_ENV → var/cloud.json の env_id）")
+               help="対象の環境 ID（省略時: $CODEX_BRIDGE_CLOUD_ENV → cloud.json のリポジトリ別設定 → env_id）")
+    s.add_argument("--cd", default=None,
+                   help="実行ディレクトリ（既定: カレント。ブランチ・リポジトリ別環境の解決にも使用）")
     s.add_argument("--attempts", type=int, default=1, help="best-of-N の N（既定 1）")
     s.add_argument("--branch", default=None, help="実行対象の git ブランチ（既定: 現在のブランチ）")
     s.add_argument("--prompt", default=None, help="プロンプト文字列")
@@ -132,25 +135,97 @@ def decode_prompt(raw: bytes, source: str) -> str:
     return text
 
 
-def resolve_env_id(args) -> str | None:
+def extract_github_repo_slug(remote_url: str) -> str | None:
+    """GitHub origin URL から比較用の ``owner/repo`` を取り出す。"""
+    prefixes = ("git@github.com:", "https://github.com/", "ssh://git@github.com/")
+    prefix = next((item for item in prefixes if remote_url.startswith(item)), None)
+    if prefix is None:
+        return None
+    parts = remote_url[len(prefix):].rstrip("/").split("/")
+    if len(parts) != 2 or not all(parts):
+        return None
+    owner, repo = parts
+    if repo.endswith(".git"):
+        repo = repo[:-4]
+    if not repo:
+        return None
+    return f"{owner}/{repo}".casefold()
+
+
+def repository_slug(directory: Path, git_runner=subprocess.run) -> str | None:
+    """directory の origin remote から GitHub リポジトリ slug を得る。失敗は未設定扱い。"""
+    try:
+        result = git_runner(
+            ["git", "-C", str(directory), "remote", "get-url", "origin"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        return None
+    return extract_github_repo_slug(result.stdout.strip())
+
+
+def _configured_env_id(value) -> str | None:
+    """environments の手書き形式（文字列 / {"env_id": 文字列}）を吸収する。"""
+    if isinstance(value, str) and value:
+        return value
+    if isinstance(value, dict):
+        value = value.get("env_id")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def resolve_env_id(args, *, config_path: Path | None = None, environ=None,
+                   git_runner=subprocess.run) -> str | None:
     """submit の --env 省略時の既定値を解決する。
 
-    優先順: 明示の --env → 環境変数 CODEX_BRIDGE_CLOUD_ENV → var/cloud.json の "env_id"。
+    優先順: 明示の --env → 環境変数 CODEX_BRIDGE_CLOUD_ENV → cloud.json の
+    environments[実行ディレクトリの GitHub slug] → cloud.json の "env_id"。
     var/cloud.json は gitignore 済みのマシンローカル設定（アカウント紐付きの ID を
-    リポジトリに残さないため）。
+    リポジトリに残さないため）。config_path / environ / git_runner はテスト用の注入点。
     """
     if args.env:
         return args.env
-    from_env = os.environ.get("CODEX_BRIDGE_CLOUD_ENV")
+    if environ is None:
+        environ = os.environ
+    from_env = environ.get("CODEX_BRIDGE_CLOUD_ENV")
     if from_env:
         return from_env
-    cfg = lib.var_dir() / "cloud.json"
+    cfg = config_path if config_path is not None else lib.var_dir() / "cloud.json"
     try:
         data = json.loads(cfg.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    value = data.get("env_id") if isinstance(data, dict) else None
-    return value if isinstance(value, str) and value else None
+    if not isinstance(data, dict):
+        return None
+
+    directory = Path(getattr(args, "cd", None) or Path.cwd())
+    slug = repository_slug(directory, git_runner)
+    environments = data.get("environments")
+    if slug and isinstance(environments, dict):
+        for configured_slug, value in environments.items():
+            if isinstance(configured_slug, str) and configured_slug.casefold() == slug:
+                resolved = _configured_env_id(value)
+                if resolved:
+                    return resolved
+                break
+    return _configured_env_id(data.get("env_id"))
+
+
+def validate_submit_directory(args) -> bool:
+    """submit の実行ディレクトリを検証し、子プロセスに渡せる形に正規化する。"""
+    directory = Path(args.cd).expanduser() if args.cd else Path.cwd()
+    if not directory.is_dir():
+        lib.eprint(f"エラー: --cd は存在するディレクトリを指定してください: {directory}")
+        return False
+    args.cd = str(directory)
+    return True
 
 
 def load_prompt(args) -> tuple[str | None, int]:
@@ -259,7 +334,7 @@ def _terminate(proc: subprocess.Popen) -> None:
             pass
 
 
-def run_child(argv: list[str], timeout: float) -> tuple[int | None, list[str]]:
+def run_child(argv: list[str], timeout: float, cwd: str | None = None) -> tuple[int | None, list[str]]:
     """子を起動し、stdout はそのまま継承、stderr は素通しさせつつ末尾だけ控える。
 
     戻り値は (returncode|None, stderr 末尾行)。returncode が None ならタイムアウト。
@@ -272,6 +347,7 @@ def run_child(argv: list[str], timeout: float) -> tuple[int | None, list[str]]:
             argv,
             stdout=None,                 # 親の stdout をそのまま継承する
             stderr=subprocess.PIPE,
+            cwd=cwd,
             start_new_session=True,      # killpg で子孫ごと止められるようにする
         )
     except (OSError, ValueError) as e:
@@ -310,7 +386,8 @@ def run_child(argv: list[str], timeout: float) -> tuple[int | None, list[str]]:
 
 def execute(args, argv: list[str]) -> int:
     """子を実行し、終了コードを本スクリプトの規約へ正規化する。"""
-    rc, tail = run_child(argv, args.timeout_sec)
+    cwd = args.cd if args.cmd == "submit" else None
+    rc, tail = run_child(argv, args.timeout_sec, cwd=cwd)
     if rc is None:
         lib.eprint(f"エラー: タイムアウト（{args.timeout_sec:g}s）: {shlex.join(argv)}")
         return 3
@@ -344,9 +421,14 @@ def main(argv_in=None) -> int:
 
     prompt = None
     if args.cmd == "submit":
+        if not validate_submit_directory(args):
+            return 1
         args.env = resolve_env_id(args)
         if not args.env:
-            lib.eprint("エラー: 環境 ID がありません（--env / $CODEX_BRIDGE_CLOUD_ENV / var/cloud.json の env_id）")
+            lib.eprint(
+                "エラー: 環境 ID がありません（--env / $CODEX_BRIDGE_CLOUD_ENV / "
+                "cloud.json の environments / env_id）"
+            )
             return 1
         prompt, code = load_prompt(args)
         if code:

@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import json
 import os
 import subprocess
 import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
@@ -85,6 +87,24 @@ class TestCloudArgValidation(CloudBase):
         self.assertEqual(proc.returncode, 4, proc.stderr)
         self.assertIn("見つかりません", proc.stderr)
 
+    def test_submit_cd_must_be_an_existing_directory(self):
+        proc = self.cloud(["submit", "--env", "env_1", "--prompt", "x",
+                           "--cd", str(self.tmp / "no-such-dir"),
+                           "--codex-bin", str(self.fake_bin)])
+        self.assertEqual(proc.returncode, 1, proc.stderr)
+        self.assertIn("--cd は存在するディレクトリ", proc.stderr)
+
+    def test_submit_cd_is_used_as_child_cwd(self):
+        fake_codex = self.tmp / "fake-codex"
+        fake_codex.write_text("#!/bin/sh\npwd\n", encoding="utf-8")
+        fake_codex.chmod(0o755)
+        workdir = self.tmp / "workdir"
+        workdir.mkdir()
+        proc = self.cloud(["submit", "--env", "env_1", "--prompt", "x",
+                           "--cd", str(workdir), "--codex-bin", str(fake_codex)])
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertTrue(Path(proc.stdout.strip()).samefile(workdir))
+
 
 class TestCloudArgvMirrors(CloudBase):
     """組み立てた argv が実 CLI（`codex cloud <sub> --help`）のフラグと一致すること。"""
@@ -147,3 +167,80 @@ class CloudEnvResolution(CloudBase):
         # env 解決を通過し、次段のバイナリ解決で exit 4 になる（exit 1 なら解決失敗）
         self.assertEqual(r.returncode, 4, r.stderr)
         self.assertNotIn("環境 ID がありません", r.stderr)
+
+
+class TestRepositoryEnvironmentResolution(CloudBase):
+    def resolve(self, config, cd=None, git_runner=None, environ=None):
+        import codex_cloud
+        config_path = self.tmp / "cloud.json"
+        config_path.write_text(json.dumps(config), encoding="utf-8")
+        args = codex_cloud.build_parser().parse_args(["submit", "--prompt", "x"])
+        args.cd = str(cd) if cd is not None else None
+        kwargs = {"config_path": config_path, "environ": environ if environ is not None else {}}
+        if git_runner is not None:
+            kwargs["git_runner"] = git_runner
+        return codex_cloud.resolve_env_id(args, **kwargs)
+
+    def test_extract_github_repo_slug(self):
+        import codex_cloud
+        for url in (
+            "git@github.com:ReRaKuIMS/Lav-Rails.git",
+            "https://github.com/ReRaKuIMS/Lav-Rails",
+            "ssh://git@github.com/ReRaKuIMS/Lav-Rails.git",
+        ):
+            self.assertEqual(codex_cloud.extract_github_repo_slug(url), "rerakuims/lav-rails")
+        for url in ("", "git@gitlab.com:owner/repo.git", "https://github.com/owner", "owner/repo"):
+            self.assertIsNone(codex_cloud.extract_github_repo_slug(url))
+
+    def test_repository_mapping_accepts_string_and_matches_case_insensitively(self):
+        repo = self.tmp / "repo"
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                        "git@github.com:ReRaKuIMS/Lav-Rails.git"],
+                       check=True, capture_output=True, text=True)
+        self.assertEqual(
+            self.resolve(
+                {"env_id": "global", "environments": {"RERAKUIMS/LAV-RAILS": "repo-env"}},
+                cd=repo,
+            ),
+            "repo-env",
+        )
+
+    def test_repository_mapping_accepts_env_id_object(self):
+        class Completed:
+            returncode = 0
+            stdout = "https://github.com/owner/repo.git\n"
+
+        self.assertEqual(
+            self.resolve({"environments": {"owner/repo": {"env_id": "repo-env"}}},
+                         git_runner=lambda *args, **kwargs: Completed()),
+            "repo-env",
+        )
+
+    def test_repository_mapping_reaches_bin_resolution(self):
+        import codex_cloud
+        repo = self.tmp / "repo-for-main"
+        subprocess.run(["git", "init", str(repo)], check=True, capture_output=True, text=True)
+        subprocess.run(["git", "-C", str(repo), "remote", "add", "origin",
+                        "git@github.com:ReRaKuIMS/Lav-Rails.git"],
+                       check=True, capture_output=True, text=True)
+        (self.tmp / "cloud.json").write_text(
+            json.dumps({"environments": {"rerakuims/lav-rails": "repo-env"}}),
+            encoding="utf-8",
+        )
+        with mock.patch.object(codex_cloud.lib, "var_dir", return_value=self.tmp), \
+             mock.patch.dict(os.environ, {"CODEX_BRIDGE_CLOUD_ENV": ""}):
+            code = codex_cloud.main([
+                "submit", "--cd", str(repo), "--prompt", "x", "--codex-bin", str(self.fake_bin),
+            ])
+        self.assertEqual(code, 4)
+
+    def test_git_unavailable_falls_back_to_global_default(self):
+        def missing_git(*args, **kwargs):
+            raise FileNotFoundError("git")
+
+        self.assertEqual(
+            self.resolve({"env_id": "global", "environments": {"owner/repo": "repo-env"}},
+                         git_runner=missing_git),
+            "global",
+        )

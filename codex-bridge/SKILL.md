@@ -84,13 +84,20 @@ python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/script
 
 **クラウド並列実装（best-of-N）**:
 ```bash
-python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py submit --attempts 3 --prompt-file /tmp/p.md
+python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py submit --cd <対象リポジトリ> --attempts 3 --prompt-file /tmp/p.md
 python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py list --json / status <task> / diff <task> --attempt N
 python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py apply <task> --attempt N --yes   # --yes なしはドライラン
 ```
-- `--env` は省略可（既定値の解決順: `--env` → `$CODEX_BRIDGE_CLOUD_ENV` → `var/cloud.json` の
-  `env_id`）。環境 ID は Codex Web の環境設定 URL 末尾の 32 桁 hex。未設定リポジトリで使うときは
-  ChatGPT 側（chatgpt.com/codex → Settings → Environments）で GitHub 連携と環境作成が先。
+- `--env` は通常省略する。解決順: `--env` → `$CODEX_BRIDGE_CLOUD_ENV` → `var/cloud.json` の
+  `environments[--cd のリポジトリの owner/repo]`（origin remote から自動判定）→ top-level `env_id`。
+  登録済みリポジトリなら **`--cd <リポジトリ>` を渡すだけで正しい環境に飛ぶ**。1環境=1リポジトリ。
+  未登録リポジトリはエラーで止まる（誤った環境への投下防止のため、全体既定の `env_id` は置かない運用）。
+- 新しいリポジトリを足すとき: ChatGPT 側（chatgpt.com/codex → Settings → Environments）で GitHub
+  連携と環境作成（環境 ID は設定 URL 末尾の 32 桁 hex）→ `var/cloud.json` の `environments` に
+  `"owner/repo": "<hex>"` を追記。org リポジトリは GitHub App の org 承認が要る場合がある。
+- リポジトリ横断のタスクは cloud では1タスクにできない（1環境=1リポ）。ローカル直列/spawn で行う。
+- WIP ブランチ作業中のリポジトリに投げるときは `--branch <既定ブランチ>` を明示する
+  （cloud はローカルの checkout 状態でなく push 済みブランチに対して走る）。
 - cloud はリポジトリの **push 済みの状態**に対して走る（ローカルの未コミット変更は見えない）。
 - `status` はタスクが pending の間、子 codex が非ゼロを返すことがある（→ラッパーは exit 2）。
   完了判定は exit code でなく出力の `[READY]` か `list --json` の `status` で行う。初回タスクは
