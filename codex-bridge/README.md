@@ -221,18 +221,19 @@ python3 -m unittest discover -s codex-bridge/tests -v     # リポジトリル�
 
 ## 契約後の実機検証チェックリスト
 
-モックで検証できるのは配管まで。Codex 契約後、以下を**実機で**確認する。
+モックで検証できるのは配管まで。**2026-08-24 に実機（codex-cli 0.149.1 / ChatGPT Pro）で検証済み**。結果:
 
-- [ ] `codex --version` が 0.149.0 以上で、PATH 解決が cmux シムではなく実バイナリを指す
-- [ ] `--model gpt-5.6-sol` / `terra` / `luna` がそれぞれ通る（モデル ID の実在確認）
-- [ ] `-c model_reasoning_effort=xhigh` が拒否されない
-- [ ] `--output-schema` が実際に効く（`last.md` が schema 準拠の JSON になる）
-- [ ] `exec review` が `--output-schema` を無視するバグが残っているか（残っていれば現行方針を維持）
-- [ ] `turn.completed` の `usage` が 5 フィールド全部返るか（欠けるなら `credits_est` の前提を見直す）
-- [ ] `reasoning_output_tokens` が `output_tokens` に内包されるか（クレジット計上の [未確認] 解消）
-- [ ] `--max-parallel 2` で token_invalidated（#26303）が再現するか（しなければ並列度を上げられる）
-- [ ] テスト失敗を含む依頼で **exit 0 かつ status=completed** になること（成否判定の前提確認）
-- [ ] 長時間タスクで idle timeout が誤発火しないこと（推論中に無イベント期間がどれだけ空くか）
-- [ ] **`--resume` 時の `turn.completed.usage` がスレッド累計かターン差分か**（累計なら既定の
-      `usage_mode = cumulative` のまま。ターン差分なら `per_turn` に切り替える）
-- [ ] `forced_login_method` の受理値（`"chatgpt"` / `"api"`。`"api"` で従量課金になること）
+- [x] `codex --version` = 0.149.1。PATH 解決は cmux シムを除外し実バイナリ（nodenv 経由）を選択（warnings に除外記録）
+- [x] `--model gpt-5.6-sol` / `terra` / `luna` すべて受理
+- [x] `-c model_reasoning_effort=xhigh` 受理（sol/xhigh で確認）
+- [x] `--output-schema` 実効（`structured_output` に schema 準拠 JSON。E2E レビューでも verdict/findings を取得）
+- [ ] `exec review` の `--output-schema` 無視バグの再確認（未実施。現行方針＝review は通常 exec + review プロンプトで回避済みのため優先度低）
+- [x] `turn.completed` の `usage` は 5 フィールド全部返る
+- [x] `reasoning_output_tokens` は `output_tokens` に**内包**（出力 131 tok 中 reasoning 72、可視出力 121 バイトと整合）→ credits 計上の前提どおり
+- [x] 並列 2 で token_invalidated（#26303）は**再現せず**（両方 completed・認証維持）。`--max-parallel` は 2 まで実績あり（それ以上は未検証）
+- [x] テスト失敗を含む依頼で exit 0 かつ status=completed（command_execution failed を記録しつつ turn 正常完了）→ 成否判定は job.json で行う前提どおり
+- [ ] 長時間タスクでの idle timeout 誤発火（未検証。実タスク投入時に `--idle-timeout-sec` を大きめから始める）
+- [x] `--resume` 時の `turn.completed.usage` は**ターン差分**（累計ではない）→ `config/codex_bridge.json` を `usage_mode = "per_turn"` に切替済み
+- [ ] `forced_login_method = "api"` で従量課金になることの確認（未実施。危険側の検証のため意図的にスキップ。`"chatgpt"` を設定済み）
+
+検証ログ: セッション scratchpad `mikken/`（j1〜j7, e2e-*）。E2E: terra `--write` によるバグ修正（touched_files 1 件・テスト実過を統括側で検収）→ 構造化レビュー（approve / findings 0）。この日の消費合計 2.99 クレジット。

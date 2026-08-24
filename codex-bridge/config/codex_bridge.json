@@ -1,4 +1,4 @@
 {
-  "usage_mode": "cumulative",
-  "_note": "usage_mode: cumulative | per_turn。--resume 時の turn.completed.usage がスレッド累計（cumulative）かターン単体（per_turn）か。実機検証で確定するまでの既定は cumulative。"
+  "usage_mode": "per_turn",
+  "_note": "usage_mode: cumulative | per_turn。実機検証 2026-08-24: --resume 時の turn.completed.usage はターン単体（per_turn）だった（j5-a/j5-b、B.output=5・input 非累計）。"
 }
