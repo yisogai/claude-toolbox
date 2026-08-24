@@ -215,6 +215,7 @@ fi
 
 C_EST="-"; C_PACE="-"; C_CAP="$CAP"; C_AT=0; C_UNK=0; C_ERR=0
 X_CR="-"; X_PCT="-"; X_PACE="-"
+O_USED="-"; O_EL="-"; O_PACE="-"; O_STALE=0
 if [ -f "$CACHE" ]; then
   # Codex レーン（cache.json の .codex）も同じ jq 呼び出しで読む（jq の起動回数を増やさない）。
   # .codex が null（台帳なし）なら全て "-" になり、🅒 セグメントは出さない＝既存表示と完全一致。
@@ -224,8 +225,12 @@ if [ -f "$CACHE" ]; then
                  s(.computed_at; 0), (((.unknown_models // []) | length) | tostring),
                  (if .error then "1" else "0" end),
                  s(.codex.window_credits; "-"), s(.codex.used_pct; "-"),
-                 s(.codex.pace; "-") ] | @tsv' "$CACHE" 2>/dev/null)"
-  [ -n "$CJ" ] && IFS=$'\t' read -r C_EST C_PACE C_CAP C_AT C_UNK C_ERR X_CR X_PCT X_PACE <<< "$CJ"
+                 s(.codex.pace; "-"),
+                 s(.codex.official.used_pct; "-"), s(.codex.official.elapsed_ratio; "-"),
+                 s(.codex.official.pace; "-"),
+                 (if .codex.official.stale then "1" else "0" end) ] | @tsv' "$CACHE" 2>/dev/null)"
+  [ -n "$CJ" ] && IFS=$'\t' read -r C_EST C_PACE C_CAP C_AT C_UNK C_ERR X_CR X_PCT X_PACE \
+                                    O_USED O_EL O_PACE O_STALE <<< "$CJ"
 fi
 
 SEG="$(awk -v sd_used="$SD_USED" -v sd_reset="$SD_RESET" \
@@ -233,6 +238,7 @@ SEG="$(awk -v sd_used="$SD_USED" -v sd_reset="$SD_RESET" \
            -v now="$NOW" -v est="$C_EST" -v fpace="$C_PACE" -v cap="$C_CAP" -v cat="$C_AT" \
            -v unk="$C_UNK" -v cerr="$C_ERR" \
            -v xcr="$X_CR" -v xpct="$X_PCT" -v xpace="$X_PACE" \
+           -v oused="$O_USED" -v oel="$O_EL" -v opace="$O_PACE" -v ostale="$O_STALE" \
            -v ttl="$TTL" -v blo="$BAND_LO" -v bhi="$BAND_HI" -v margin="$MARGIN" '
 function color(u, e,   p) {
   if (e < 1) return DIM;
@@ -281,9 +287,20 @@ BEGIN {
     out = (out == "") ? fivseg : out " " fivseg;
   }
   # Codex レーン（cache.json に .codex があるときだけ）。
-  #   上限未設定: 🅒 12cr（薄色。Codex の枠は絶対値非公開のため % は出せない）
-  #   上限設定時: 🅒 34%/57% ·0.60（週次枠と同じ pace 色）
-  if (xcr != "-") {
+  #   公式 usage あり: 🅒 12%/34% ·0.35（Codex 公式の used% / 公式窓の経過% / ペース。
+  #                    色は 📅W と同じ band 判定。サンプルが古ければ薄色 + 末尾 "?"）
+  #   上限未設定    : 🅒 12cr（薄色。Codex の枠は絶対値非公開のため % は出せない）
+  #   上限設定時    : 🅒 34%/57% ·0.60（週次枠と同じ pace 色）
+  if (oused != "-" && oel != "-") {
+    # 公式窓の経過率は 0〜1 の比率で入っている（📅W と揃えて % に直す）
+    oew = oel * 100;
+    if (oew < 0) oew = 0; if (oew > 100) oew = 100;
+    op = (opace == "-") ? pacetxt(oused, oew) : sprintf("%.2f", opace);
+    obody = sprintf("🅒 %.0f%%/%.0f%% ·%s", oused, oew, op);
+    if (ostale + 0 == 1) xseg = DIM obody "?" RST;
+    else xseg = color(oused, oew) obody RST;
+    out = (out == "") ? xseg : out " " xseg;
+  } else if (xcr != "-") {
     if (xpct != "-" && ew >= 0) {
       xp = (xpace == "-") ? pacetxt(xpct, ew) : sprintf("%.2f", xpace);
       xseg = color(xpct, ew) sprintf("🅒 %.0f%%/%.0f%% ·%s", xpct, ew, xp) RST;

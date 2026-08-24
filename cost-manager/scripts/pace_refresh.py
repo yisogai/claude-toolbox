@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
+import codex_official
 import cost_lib as lib
 
 WEEK_SEC = 7 * 24 * 3600
@@ -243,19 +244,125 @@ def _calibration(samples, rows, pricing, at, window_start, window_end):
 FIVE_HOUR_SEC = 5 * 3600
 
 
-def codex_section(config, window_start: float, window_end: float) -> dict:
-    """Codex 使用量レーン（codex-bridge の台帳）の集計。台帳が無ければ None を返す。
+def official_lane(pace_cfg: dict, now: float, notes: list):
+    """Codex 公式 usage をサンプリングし、cache 用の `official` dict を返す（無ければ None）。
 
-    台帳は読むだけで、cost-manager 側から書き込むことは無い。窓は Claude 側の
-    seven_day 窓（[window_start, window_end]）をそのまま使う。Codex の週次窓は
-    リセット時刻が別なので**近似**であり、notes にその旨を書く。5 時間窓は
-    「window_end から遡って 5 時間」とする（Codex 側のリセット時刻は取得できない）。
+    - `budget.pace.codex_official.enabled` が偽なら何もしない（サンプルも読まない）。
+    - 取得の失敗（auth.json 不在・401・タイムアウト・不正 JSON）は notes に 1 行入れて
+      続行する。refresh 全体を失敗させない。
+    - 直近サンプルが `max_age_sec` より古ければ `stale: true` を立てる。
 
-    `budget.pace.codex_weekly_credits` が設定されていれば % とペースを出す。
-    未設定なら `weekly_cap: null` として % は出さない（Codex の枠は絶対値非公開）。
+    プライバシー: ここで扱うのは `codex_official` が数値だけに削ぎ落としたレコードのみ。
+    例外は型名か `OfficialError` の自前メッセージだけを notes に載せる（トークン・識別子を
+    載せないため、例外オブジェクトの中身は展開しない）。
+    """
+    cfg = codex_official.official_config(pace_cfg)
+    enabled, enabled_warn = codex_official.official_enabled(cfg)
+    if enabled_warn:
+        notes.append(enabled_warn)
+    if not enabled:
+        return None
+
+    try:
+        codex_official.sample_official(cfg=cfg, now=now)
+    except codex_official.OfficialError as e:
+        notes.append(f"Codex 公式 usage を取得できませんでした: {e}")
+    except Exception as e:  # noqa: BLE001 - 中身は出さない（トークン混入の恐れ）
+        notes.append(
+            f"Codex 公式 usage を取得できませんでした（{type(e).__name__}）。"
+        )
+
+    samples = codex_official.read_official_samples()
+    if not samples:
+        # ファイルはあるのに有効な行が 1 件も無い＝すべてスキップされた（窓・ts が範囲外、
+        # 壊れた行）。黙って Codex 節を落とすと原因が分からないので注記を出す。
+        try:
+            has_lines = codex_official.official_samples_path().stat().st_size > 0
+        except OSError:
+            has_lines = False
+        if has_lines:
+            notes.append(
+                "Codex 公式 usage の有効なサンプルがありません"
+                "（窓が不正・ts が不正な行はスキップしました）。"
+            )
+        return None
+    last = samples[-1]
+    p = last.get("primary") or {}
+    used_pct = codex_official._num(p.get("used_percent"))
+    span = codex_official._num(p.get("limit_window_seconds"))
+    reset_at = codex_official._num(p.get("reset_at"))
+    sampled_at = codex_official._num(last.get("ts"))
+    if used_pct is None or sampled_at is None:
+        notes.append("Codex 公式 usage のサンプルが不正なため無視しました。")
+        return None
+    # 窓は `datetime.fromtimestamp()` に渡るので、極端値（NaN / inf / 1e12 / ミリ秒・
+    # マイクロ秒・ナノ秒単位）をここで弾く。弾かないと refresh 全体が落ち、Claude 側の
+    # 集計まで巻き添えでエラーキャッシュになる。
+    if not (codex_official.valid_window_span(span)
+            and codex_official.valid_epoch(reset_at)
+            and codex_official.valid_epoch(sampled_at)
+            and valid_resets_at(reset_at - span)
+            and (reset_at - span) <= reset_at):
+        notes.append("Codex 公式 usage のサンプルの窓が不正なため無視しました。")
+        return None
+    used_pct = float(used_pct)
+    span = float(span)
+    reset_at = float(reset_at)
+    sampled_at = float(sampled_at)
+    if last.get("fixture"):
+        notes.append(
+            "[テスト] フィクスチャ応答を使用した Codex 公式 usage サンプルです"
+            "（FCM_CODEX_OFFICIAL_FIXTURE）。実際の使用量ではありません。"
+        )
+
+    window_start = reset_at - span
+    end = min(now, reset_at)
+    elapsed_ratio = max(0.0, min(1.0, (end - window_start) / span))
+    has_elapsed = elapsed_ratio >= MIN_ELAPSED_RATIO
+    try:
+        max_age = float(cfg.get("max_age_sec") or codex_official.OFFICIAL_DEFAULTS["max_age_sec"])
+    except (TypeError, ValueError):
+        max_age = codex_official.OFFICIAL_DEFAULTS["max_age_sec"]
+    stale = (now - sampled_at) > max_age
+    if stale:
+        notes.append(
+            "Codex 公式 usage のサンプルが古いままです"
+            f"（{lib.fmt_duration(max(0.0, now - sampled_at))}前）。"
+        )
+
+    return {
+        "used_pct": used_pct,
+        "window_start": window_start,
+        "reset_at": reset_at,
+        "elapsed_ratio": elapsed_ratio,
+        "pace": (used_pct / (elapsed_ratio * 100.0)) if has_elapsed else None,
+        "projected_end_pct": (used_pct / elapsed_ratio) if has_elapsed else None,
+        "plan_type": last.get("plan_type"),
+        "sampled_at": sampled_at,
+        "stale": stale,
+        "secondary": last.get("secondary"),
+    }
+
+
+def codex_section(config, window_start: float, window_end: float, official=None) -> dict:
+    """Codex 使用量レーン（codex-bridge の台帳）の集計。
+
+    台帳が無く公式 usage も無ければ None を返す（従来どおり Codex 節を出さない）。
+
+    窓:
+      - 公式 usage（`official`）があるときは**公式窓**（window_start = reset_at −
+        limit_window_seconds 〜 現在）で集計する。呼び出し側がその窓を渡す。
+      - 無いときは従来どおり Claude の seven_day 窓の**近似**で、notes にその旨を書く。
+      - 5 時間窓は「window_end から遡って 5 時間」（Codex 側の 5 時間リセット時刻は
+        公式応答の secondary_window にあるが、台帳側の窓としては使っていない）。
+
+    上限（% / ペースの分母）:
+      - 手動 `budget.pace.codex_weekly_credits` を最優先（`cap_source: "manual"`）。
+      - 無ければ公式 % からの自動較正 `weekly_cap_est`（`cap_source: "estimated"`）。
+        `weekly_cap_est = 窓内クレジット ÷ (used_pct / 100)`。`used_pct < 1` では算出しない。
     """
     path = lib.codex_ledger_path(config)
-    if not path.exists():
+    if not path.exists() and official is None:
         return None
 
     pace_cfg = lib.pace_config(config)
@@ -291,10 +398,43 @@ def codex_section(config, window_start: float, window_end: float) -> dict:
         notes.append("codex_weekly_credits が 0 以下のため上限未設定として扱いました。")
         cap = None
 
+    # 公式 % からの自動較正（窓内クレジット ÷ 使用率）。整数丸めのため誤差が大きい。
+    cap_est = None
+    if official is not None:
+        o_used = official.get("used_pct")
+        if o_used is not None and o_used >= 1.0 and agg["credits"] > 0:
+            cap_est = agg["credits"] / (o_used / 100.0)
+            notes.append(
+                f"週次上限の自動較正: 公式 {o_used:.0f}% と窓内 "
+                f"{lib.fmt_credits(agg['credits'])}cr から約 {lib.fmt_credits(cap_est)}cr と推定"
+                "（used_percent は整数丸めのため誤差が大きい）。"
+            )
+        elif o_used is not None and o_used < 1.0:
+            notes.append(
+                "公式 used_percent が 1% 未満のため週次上限の較正はできません"
+                "（% が小さすぎて較正不能）。"
+            )
+        else:
+            notes.append("窓内の台帳クレジットが 0 のため週次上限の較正はできません。")
+
     used_pct = pace = projected = None
+    cap_source = None
     if cap:
-        used_pct = agg["credits"] / cap * 100.0
-        elapsed_ratio = max(0.0, min(1.0, (window_end - window_start) / WEEK_SEC))
+        cap_source = "manual"
+    elif cap_est and cap_est > 0:
+        cap_source = "estimated"
+    cap_used = cap if cap_source == "manual" else (cap_est if cap_source == "estimated" else None)
+
+    if cap_used:
+        used_pct = agg["credits"] / cap_used * 100.0
+        # 経過率の分母は窓の実幅。公式窓が 7 日以外（Codex 側の窓変更・別プラン）でも
+        # 公式行の経過率・ペースと矛盾しないよう、`reset_at - window_start` を使う。
+        span = WEEK_SEC
+        if official is not None:
+            o_span = (official.get("reset_at") or 0) - (official.get("window_start") or 0)
+            if o_span and o_span > 0:
+                span = o_span
+        elapsed_ratio = max(0.0, min(1.0, (window_end - window_start) / span))
         if elapsed_ratio >= MIN_ELAPSED_RATIO:
             pace = (used_pct / 100.0) / elapsed_ratio
             projected = used_pct / elapsed_ratio
@@ -304,10 +444,18 @@ def codex_section(config, window_start: float, window_end: float) -> dict:
             "枠の絶対値が非公開のため % とペースは出せません。"
         )
 
-    notes.append(
-        "窓は Claude の seven_day 窓をそのまま使っています。Codex の週次窓は"
-        "リセット時刻が別なので**近似**です。5 時間窓は窓終端から遡った 5 時間です。"
-    )
+    if official is not None:
+        notes.append(
+            "窓は Codex の**公式窓**（公式 usage の reset_at − limit_window_seconds 〜 現在）"
+            "で集計しています。5 時間窓は窓終端から遡った 5 時間です。"
+        )
+    else:
+        notes.append(
+            "窓は Claude の seven_day 窓をそのまま使っています。Codex の週次窓は"
+            "リセット時刻が別なので**近似**です。5 時間窓は窓終端から遡った 5 時間です。"
+        )
+    if not path.exists():
+        notes.append(f"Codex の使用量台帳がまだありません: {path}")
     if agg["unknown_models"]:
         notes.append(
             "codex_pricing.json 未収載かつ credits_est の無いモデルがあります"
@@ -334,9 +482,14 @@ def codex_section(config, window_start: float, window_end: float) -> dict:
             for k, v in agg["by_model"].items()
         },
         "weekly_cap": cap,
+        "weekly_cap_est": cap_est,
+        "cap_source": cap_source,
         "used_pct": used_pct,
         "pace": pace,
         "projected_end_pct": projected,
+        "official": official,
+        "window_start": window_start,
+        "window_end": window_end,
         "ledger_path": str(path),
         "ignored_rows": ignored,
         "ignored_detail": {
@@ -367,11 +520,22 @@ def refresh(args) -> dict:
     samples_path = lib.pace_dir() / "samples.jsonl"
     samples = _iter_samples(samples_path)
 
+    # 引数の検証はネットワーク（official_lane）より**前**に行う。無効な引数で
+    # 落ちると決まっているのに公式 usage を叩くのは無駄で、スロットル枠も消費する。
+    if args.resets_at is not None and not valid_resets_at(args.resets_at):
+        raise lib.ConfigError(
+            f"--resets-at が Unix epoch 秒の範囲外です: {args.resets_at}"
+        )
+
+    # Codex 公式 usage（ネットワーク）。失敗しても notes に 1 行入れて続行する。
+    # Claude 側のサンプル（窓）とは独立に成立するので、窓が決まらない場合でも使う。
+    official = official_lane(pace_cfg, now, notes)
+    if official is not None:
+        codex_window = (official["window_start"], min(now, official["reset_at"]))
+    else:
+        codex_window = None
+
     if args.resets_at is not None:
-        if not valid_resets_at(args.resets_at):
-            raise lib.ConfigError(
-                f"--resets-at が Unix epoch 秒の範囲外です: {args.resets_at}"
-            )
         resets_at = int(args.resets_at)
         used = float(args.used) if args.used is not None else (samples[-1][1] if samples else 0.0)
         notes.append("窓は手動指定（--resets-at / --used）です。")
@@ -394,9 +558,11 @@ def refresh(args) -> dict:
             "unknown_tokens": 0,
             "calibration":{"usd_per_pct": None, "n_pairs": 0, "method": "median_of_adjacent_sample_pairs"},
             "samples_n": len(samples),
-            # 窓が決まらないので Codex 側も集計できない（台帳の有無に関わらず null）
-            "codex": None,
-            "notes": ["no samples"],
+            # Claude 側の窓が決まらないので Claude の集計はできないが、公式 usage があれば
+            # Codex 側は公式窓だけで成立する（台帳も公式窓で集計する）。
+            "codex": (codex_section(config, codex_window[0], codex_window[1], official=official)
+                      if codex_window else None),
+            "notes": ["no samples"] + notes,
         }
 
     start = resets_at - WEEK_SEC
@@ -479,8 +645,10 @@ def refresh(args) -> dict:
 
     calibration = _calibration(samples, rows, pricing, at, start, end)
 
-    # Codex レーン（台帳が無ければ None）。Claude 側の集計とは独立。
-    codex = codex_section(config, start, end)
+    # Codex レーン（台帳も公式 usage も無ければ None）。Claude 側の集計とは独立。
+    # 公式 usage があれば公式窓で、無ければ従来どおり Claude の seven_day 窓の近似で集計する。
+    cx_start, cx_end = codex_window if codex_window else (start, end)
+    codex = codex_section(config, cx_start, cx_end, official=official)
 
     dropped = stats.get("dropped_no_timestamp", 0)
     if dropped:
@@ -603,6 +771,16 @@ def main():
                 f"Codex: {lib.fmt_credits(cx['window_credits'])}cr / {cx['window_jobs']} 件"
                 f"（直近5時間 {lib.fmt_credits(cx['five_hour_credits'])}cr）{cap_s}"
             )
+            o = cx.get("official")
+            if o:
+                print(
+                    f"Codex 公式: used {o['used_pct']:.0f}% / 経過 "
+                    f"{o['elapsed_ratio'] * 100:.0f}%"
+                    + (f" · pace {o['pace']:.2f}" if o.get("pace") is not None else " · pace —")
+                    + f"（plan: {o.get('plan_type') or '不明'}"
+                    + ("・サンプルが古い" if o.get("stale") else "")
+                    + "）"
+                )
         for n in cache.get("notes", []):
             print(f"注記: {n}")
 

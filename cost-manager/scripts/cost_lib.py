@@ -1165,7 +1165,16 @@ PACE_DEFAULTS = {
     # 相対パスは code_root()（scripts/ の親）基準で解決する。
     "codex_ledger": "../codex-bridge/var/codex_usage.jsonl",
     # Codex の週次上限（クレジット）。公開値が無いため既定は null（= 上限未設定）。
+    # 公式 usage のサンプルがあれば `weekly_cap_est` として自動較正される（手動値が優先）。
     "codex_weekly_credits": None,
+    # Codex 公式 usage（chatgpt.com の非公開 API）の自動サンプリング。
+    # 詳細と既定値は scripts/codex_official.py（OFFICIAL_DEFAULTS）を参照。
+    "codex_official": {
+        "enabled": True,
+        "min_interval_sec": 900,
+        "timeout_sec": 10,
+        "max_age_sec": 21600,
+    },
 }
 
 # license-switch（claude-toolbox/license-switch）が生成する .envrc のマーカー。

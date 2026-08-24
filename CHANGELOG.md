@@ -66,6 +66,7 @@ Codex（ChatGPT Pro）併用に向けた契約前準備。調査レポート・A
   到達見込み、statusline の3系統の入力、samples のスロットル・壊れ行・空ファイル、single-flight、
   10万行 samples、`resets_at` が過去（窓が閉じている）ケースを検証する。
 - `~/.claude/settings.json` の `statusLine` 切替は含めない（手動。README に手順）。
+- **Codex 公式 used_percent の自動サンプリング**を追加した（`scripts/codex_official.py` 新設）。`pace_refresh.py` が `chatgpt.com/backend-api/wham/usage` を 15 分スロットルで叩き、**数値だけ**（`plan_type` / `primary` / `secondary`。email・user_id・account_id・トークンは保存も出力もしない）を `var/pace/codex_official_samples.jsonl` に追記する。statusline の `🅒` は公式 % / 公式窓の経過 % / ペース（`🅒 12%/34% ·0.35`、古いサンプルは薄色 + `?`）に昇格し、Codex 節の窓は公式窓に切り替わる。台帳クレジットとの突き合わせで週次上限を自動較正（`weekly_cap_est`、手動 `codex_weekly_credits` が優先）。取得失敗は注記 1 行で続行し、公式サンプルが無いときの表示は従来とバイト一致（`budget.pace.codex_official`、テスト 66 件追加＝合計 167 件）。窓の値（`limit_window_seconds` / `reset_at` / `ts`）は範囲検証してから使い、極端値で refresh 全体（Claude 側集計を含む）が落ちないようにした。`timeout_sec` は 1 操作あたりで、全体はその 3 倍の壁時計期限で打ち切る。テスト専用フィクスチャを使ったサンプルには `"fixture": true` と注記が必ず付く。
 - **Codex 使用量レーン**を追加した。codex-bridge の台帳 `codex-bridge/var/codex_usage.jsonl` を読み取り専用で集計し、statusline の `🅒` セグメント・`pace_report.py` の「Codex」節・`cost_report.py` のレポート「Codex（参考）」表に出す（台帳が無ければ既存表示と完全に同一。Codex の枠は絶対値非公開のため既定では % を出さず、`budget.pace.codex_weekly_credits` 設定時のみ % とペースを出す）。
 
 #### 反証レビュー指摘の修正（同日）

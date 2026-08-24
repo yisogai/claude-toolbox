@@ -23,7 +23,13 @@
       "exhaust_margin_pct": 80,
       "exclude_cwd_prefixes": [],
       "codex_ledger": "../codex-bridge/var/codex_usage.jsonl",
-      "codex_weekly_credits": null
+      "codex_weekly_credits": null,
+      "codex_official": {
+        "enabled": true,
+        "min_interval_sec": 900,
+        "timeout_sec": 10,
+        "max_age_sec": 21600
+      }
     }
   }
 }

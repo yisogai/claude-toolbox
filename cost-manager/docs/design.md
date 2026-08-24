@@ -423,15 +423,88 @@ requestId 重複のような二重計上の構造が無いため dedup も不要
   ない。`end_display` は「最終 Claude アクティビティ」へ手前に補正されるため、それを終端にすると
   「Claude は待っているだけで、その間に完了した Codex ジョブ」が無注記で落ちる。
 
+## Codex 公式 used_percent の自動サンプリング（フェーズ2 その3 / codex-official）
+
+Codex 側の消費 % を**一次情報**として取り、`🅒` を `📅W` と同格の表示に昇格させるレーン。
+台帳（クレジット）は自前の推定値でしかないため、公式 % が取れるならそちらを窓の基準にする。
+
+### 一次情報（2026-08-24 実機確認・この形を正とする）
+
+`GET https://chatgpt.com/backend-api/wham/usage`（`Authorization: Bearer <access_token>` +
+`chatgpt-account-id: <account_id>`）。認証情報は `$CODEX_HOME/auth.json` の `tokens.*`。
+応答の `rate_limit.primary_window` に `used_percent` / `limit_window_seconds` / `reset_at`。
+
+### 設計上の判断
+
+- **数値だけを保存する**。応答には `email` / `user_id` / `account_id` が含まれるので、
+  `codex_official._shape()` で `{plan_type, primary{used_percent, limit_window_seconds,
+  reset_at}, secondary}` に削ぎ落としてから `var/pace/codex_official_samples.jsonl` に書く。
+  `plan_type` も `^[A-Za-z0-9_.-]{1,32}$` に一致するときだけ通す（想定外文字列＝識別子混入の保険）。
+- **例外に中身を載せない**。fetcher の例外は型名だけ、HTTP エラーはステータスだけを
+  `OfficialError` の自前メッセージに載せる（本文は読み捨てる）。トークンを持つローカル変数は
+  `finally` で落とし、traceback のフレームに残さない。テストは合成トークン・合成メールを
+  仕込んだうえで、隔離ルート配下の全ファイルと stdout/stderr を**文字列走査**して検証している。
+- **auth.json は読むだけ**。トークンのリフレッシュは codex CLI の仕事で、401 は注記に
+  「codex CLI を一度実行すると回復することがある」と書くだけにする（勝手に書き戻さない）。
+- **サンプリングは refresh からのみ**。statusline から同期ネットワークを呼ぶと statusline が
+  ブロックする。スロットル（`min_interval_sec`、既定 900）は
+  「**後方読みで最初に見つかった有効行**の ts」で判定する（`read_official_samples()` は末尾
+  64KB だけを後方に読み、壊れた行・`ts` や窓が範囲外の行を飛ばして有効な最終行 1 件だけを返す。
+  全行パースはしない）。不正行を飛ばすのは、悪いサンプルが最終行に居座るとスロットルの間ずっと
+  それが再利用されるため。サンプル jsonl は 5,000 行を超えたら先頭半分を切り詰める
+  （`atomic_write_text`。最新 1 件しか使わないので履歴は捨ててよい）。
+- **タイムアウトは二段**。`timeout_sec`（既定 10）は urllib の**1 操作あたり**の上限で、DNS 解決や
+  複数アドレスへの接続で実時間は積み上がる。そこで fetch を別スレッド（daemon）で回し、
+  `timeout_sec * 3` を**全体の壁時計期限**（`time.monotonic()`）として `join()` で見張り、
+  超過したら諦めて注記にする。取り残したスレッドは refresh の終了とともに消える。
+- **enabled は真偽値のみ**。`budget.pace.codex_official.enabled` は JSON の `true` のときだけ真。
+  `"false"` / `"true"` のような文字列は（truthy でも）偽として扱い、型警告を注記に出す。
+  `codex_official.py` の CLI も同じ判定に従い、無効なら `--force` でも取得せず exit 1。
+- **fetcher 注入**（`fetch_official(..., fetcher=)`）でテストはネットワークを使わない。
+  サブプロセス経路（`pace_refresh.py`）はテスト専用 env `FCM_CODEX_OFFICIAL_FIXTURE` で応答を
+  差し替える（`{"status","body"}` / `{"error"}` / `{"sleep": 秒}`）。テストの `setUp` は
+  `codex_official.enabled=false` と存在しない `CODEX_HOME` の二重で隔離してあり、既存テストが
+  誤ってネットワークへ出ることはない。フィクスチャ由来のサンプルには `"fixture": true` が付き、
+  pace の注記に「[テスト] フィクスチャ応答を使用」が必ず出る（本番で無警告に効かせない）。
+- **窓の値は範囲検証してから使う**。`limit_window_seconds` は `0 < span <= 7日 × 8`、
+  `reset_at` / `ts` / `window_start` は `0 < x < 2**31` の Unix 秒。NaN / inf / 1e12 /
+  ミリ秒・マイクロ秒・ナノ秒単位の値をそのまま `datetime.fromtimestamp()` に渡すと
+  ValueError / OverflowError で refresh 全体が落ち、**Claude 側の集計まで巻き添え**で
+  エラーキャッシュになるため。外れた場合は「窓が不正なため無視しました」の注記付きで
+  公式レーンだけを `None` にする。
+- **窓**: 公式サンプルがあるとき Codex 節の窓は公式窓（`reset_at − limit_window_seconds` 〜 now）。
+  無いときは従来どおり Claude の `seven_day` 窓の近似（注記も従来どおり）。公式窓は Claude の
+  サンプルに依存しないので、**Claude 側のサンプルがまだ無くても Codex 節は出る**
+  （`pace_report.py` も「Claude 側サンプルなし」の断り付きで Codex 節だけを出して exit 0）。
+  台帳側の経過率・ペースの分母も公式窓の実幅（`reset_at − window_start`）にする。7 日固定に
+  すると、公式窓が 7 日以外のときに公式行と台帳行のペースが食い違う。
+- **自動較正**: `weekly_cap_est = 公式窓内の台帳クレジット ÷ (used_pct / 100)`。
+  `used_pct < 1`（整数丸めで 0 になりやすい）や窓内クレジット 0 では算出しない。
+  % とペースの分母は「手動 `codex_weekly_credits` > 自動 `weekly_cap_est`」の優先で選び、
+  どちらを使ったかを `cap_source`（`"manual"` / `"estimated"` / `null`）に残す。
+
+### [未検証]
+
+- `used_percent` の丸め粒度（整数丸めと推定。週内に約 46 クレジット消費済みでも 0 が返る実測）。
+  したがって `weekly_cap_est` の誤差は大きい。
+- 窓アンカー（`reset_at`）の安定性。
+- 非公開 API であり予告なく変わりうる。壊れた場合は取得失敗として注記に出て、表示は従来の
+  クレジット表示へフォールバックする（refresh 自体は落ちない）。
+
 ### 出力先
 
-- `pace_refresh.py`: `cache.json` に `codex`（台帳が無ければ `null`。サンプル無しで窓が決まらない
-  場合も `null`）。
-- `pace_statusline.sh`: `codex` があるときだけ末尾に `🅒` セグメントを足す。cache.json を読む
-  既存の jq 呼び出しにフィールドを足しただけで **jq の起動回数は増やしていない**。台帳が無い場合の
-  出力は変更前と**バイト単位で同一**（テストで担保）。
-- `pace_report.py`: 「Codex」節（窓内クレジット・件数・モデル別・5時間窓・上限の有無・無視行数・
-  注記）と `--json` の `codex` キー。値は `cache.json` の丸ごと引き渡し（再計算しない）。
+- `pace_refresh.py`: `cache.json` に `codex`（台帳も公式サンプルも無ければ `null`）。
+  公式レーンは `codex.official`（`used_pct` / `window_start` / `reset_at` / `elapsed_ratio` /
+  `pace` / `projected_end_pct` / `plan_type` / `sampled_at` / `stale` / `secondary`）と
+  `codex.weekly_cap_est` / `codex.cap_source`。
+- `pace_statusline.sh`: `codex` があるときだけ末尾に `🅒` セグメントを足す。`codex.official` が
+  あればそれを優先して `🅒 12%/34% ·0.35`（色は `📅W` と同じ band 判定・`stale` は薄色 + `?`）、
+  無ければ従来のクレジット表示へフォールバックする。cache.json を読む既存の jq 呼び出しに
+  フィールドを足しただけで **jq の起動回数は増やしていない**。台帳が無い場合・公式サンプルが
+  無い場合の出力は変更前と**バイト単位で同一**（テストで担保）。
+- `pace_report.py`: 「Codex」節（先頭に公式行・較正推定・使用中の上限、続いて窓内クレジット・
+  件数・モデル別・5時間窓・上限の有無・無視行数・注記）と `--json` の `codex` キー。
+  値は `cache.json` の丸ごと引き渡し（再計算しない）。
 - `cost_report.py`: レポート Markdown の「## Codex（参考）」表と `var/log/reports.jsonl` の
   `codex` キー。範囲は表示用の開始〜終了と揃える。`--scope session`（既定）は
   `claude_session_id` が対象セッション ID と一致する行だけ、`--scope global` は時間窓のみ。

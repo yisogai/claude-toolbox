@@ -70,6 +70,16 @@ class PaceTestBase(unittest.TestCase):
         self.codex_ledger = self.tmp / "codex_usage.jsonl"
         self.env["FCM_CODEX_LEDGER"] = str(self.codex_ledger)
         self.pace_dir = self.root / "var" / "pace"
+        # Codex 公式 usage のサンプリングは既定で無効にする（テストからは絶対に
+        # ネットワークへ出ない）。必要なテストだけ `enable_official()` で有効化し、
+        # 応答は `FCM_CODEX_OFFICIAL_FIXTURE` で注入する。
+        # CODEX_HOME も存在しないディレクトリへ向けて二重に隔離する。
+        cfg_path = self.root / "config" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["budget"]["pace"].setdefault("codex_official", {})["enabled"] = False
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+        self.env["CODEX_HOME"] = str(self.tmp / "codexhome")
+        self.env.pop("FCM_CODEX_OFFICIAL_FIXTURE", None)
 
     def tearDown(self):
         shutil.rmtree(self.tmp, ignore_errors=True)
@@ -1704,6 +1714,1016 @@ class TestPaceReportRefreshErrorCache(PaceTestBase):
         self.assertEqual(p.returncode, 1, p.stdout)
         c = self.read_cache()
         self.assertIn("ValueError", c["error"])
+
+
+# ---------------------------------------------------------------------------
+# Codex 公式 used_percent の自動サンプリング（codex-official）
+# ---------------------------------------------------------------------------
+# ネットワークは一切使わない。HTTP 応答は fetcher 注入（in-process）または
+# `FCM_CODEX_OFFICIAL_FIXTURE`（サブプロセス）で与える。
+
+OFFICIAL_TOKEN = "sk-test-ACCESSTOKEN-DO-NOT-LEAK"
+OFFICIAL_ACCOUNT = "acct-XYZ789-DO-NOT-LEAK"
+OFFICIAL_EMAIL = "someone@example.com"
+OFFICIAL_USER = "user-abc123-DO-NOT-LEAK"
+OFFICIAL_REFRESH = "rt-REFRESHTOKEN-DO-NOT-LEAK"
+OFFICIAL_SECRETS = (
+    OFFICIAL_TOKEN, OFFICIAL_ACCOUNT, OFFICIAL_EMAIL, OFFICIAL_USER, OFFICIAL_REFRESH,
+)
+
+
+def official_mod():
+    """codex_official をテスト実行時に遅延 import する（未実装時は他テストを巻き込まない）。"""
+    import codex_official
+    return codex_official
+
+
+class CodexOfficialMixin:
+    """公式 usage の合成 auth / 合成レスポンスを用意するヘルパ。"""
+
+    def codex_home(self, auth="ok"):
+        home = self.tmp / "codexhome"
+        home.mkdir(exist_ok=True)
+        self.env["CODEX_HOME"] = str(home)
+        p = home / "auth.json"
+        if auth == "missing":
+            if p.exists():
+                p.unlink()
+        elif auth == "broken":
+            p.write_text('{"tokens": {壊れている', encoding="utf-8")
+        elif auth == "no_tokens":
+            p.write_text(json.dumps({"OPENAI_API_KEY": None}), encoding="utf-8")
+        elif auth == "empty_tokens":
+            p.write_text(json.dumps({"tokens": {"id_token": "eyJ-dummy"}}), encoding="utf-8")
+        else:
+            p.write_text(json.dumps({
+                "OPENAI_API_KEY": None,
+                "tokens": {
+                    "id_token": "eyJ-dummy",
+                    "access_token": OFFICIAL_TOKEN,
+                    "refresh_token": OFFICIAL_REFRESH,
+                    "account_id": OFFICIAL_ACCOUNT,
+                },
+                "last_refresh": "2026-08-24T00:00:00.000Z",
+            }), encoding="utf-8")
+        return p
+
+    def official_body(self, used=34, reset_at=None, window=WEEK, secondary=None):
+        """2026-08-24 実測の 200 レスポンス（識別子を含む形のまま）。"""
+        return {
+            "plan_type": "pro",
+            "email": OFFICIAL_EMAIL,
+            "user_id": OFFICIAL_USER,
+            "account_id": OFFICIAL_ACCOUNT,
+            "rate_limit": {
+                "allowed": True,
+                "limit_reached": False,
+                "primary_window": {
+                    "used_percent": used,
+                    "limit_window_seconds": window,
+                    "reset_after_seconds": 597445,
+                    "reset_at": reset_at,
+                },
+                "secondary_window": secondary,
+            },
+            "additional_rate_limits": [
+                {"limit_name": "GPT-5.3-Codex-Spark",
+                 "rate_limit": {"primary_window": {"used_percent": 90, "reset_at": reset_at}}}
+            ],
+            "credits": {"has_credits": False, "balance": "0", "account_id": OFFICIAL_ACCOUNT},
+        }
+
+    def set_fixture(self, status=200, body=None, error=None):
+        """サブプロセス実行時の HTTP 応答を注入する（ネットワークへは出ない）。"""
+        f = self.tmp / "official_fixture.json"
+        d = {"error": error} if error else {
+            "status": status,
+            "body": body if isinstance(body, str) else json.dumps(body, ensure_ascii=False),
+        }
+        f.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        self.env["FCM_CODEX_OFFICIAL_FIXTURE"] = str(f)
+
+    def enable_official(self, **over):
+        cfg_path = self.root / "config" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        o = cfg["budget"]["pace"].setdefault("codex_official", {})
+        o.update({"enabled": True, "min_interval_sec": 0, "timeout_sec": 5, "max_age_sec": 21600})
+        o.update(over)
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
+
+    def official_samples_path(self):
+        return self.pace_dir / "codex_official_samples.jsonl"
+
+    def write_official_sample(self, ts, used=34, reset_at=None, window=WEEK, plan="pro"):
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({
+            "ts": ts, "plan_type": plan,
+            "primary": {"used_percent": used, "limit_window_seconds": window,
+                        "reset_at": reset_at},
+            "secondary": None,
+        })
+        with open(self.official_samples_path(), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    def assert_no_secrets(self, *extra_texts):
+        """隔離ルート配下の全ファイルと与えられた出力に識別子・トークンが無いこと。"""
+        blobs = [(str(p), p.read_bytes()) for p in self.root.rglob("*") if p.is_file()]
+        for i, t in enumerate(extra_texts):
+            blobs.append((f"<出力{i}>", (t or "").encode("utf-8")))
+        for name, data in blobs:
+            for s in OFFICIAL_SECRETS:
+                self.assertNotIn(s.encode("utf-8"), data,
+                                 f"{name} に識別子・トークンが漏れている: {s}")
+
+
+def fake_fetcher(status=200, body=None, exc=None, log=None):
+    def _f(url, headers, timeout):
+        if log is not None:
+            log.append({"url": url, "headers": dict(headers), "timeout": timeout})
+        if exc is not None:
+            raise exc
+        return status, (body if isinstance(body, str) else json.dumps(body, ensure_ascii=False))
+    return _f
+
+
+class TestCodexOfficialFetch(CodexOfficialMixin, PaceTestBase):
+    """fetch_official / sample_official の単体（fetcher 注入・ネットワーク不使用）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.m = official_mod()
+        self.auth = self.codex_home("ok")
+        self.now = 1_755_000_000
+        self.reset_at = self.now + WEEK // 2
+
+    def test_fetch_returns_numbers_only(self):
+        body = self.official_body(used=34, reset_at=self.reset_at)
+        got = self.m.fetch_official(auth_path=self.auth, fetcher=fake_fetcher(body=body))
+        self.assertEqual(set(got), {"plan_type", "primary", "secondary"})
+        self.assertEqual(got["plan_type"], "pro")
+        self.assertEqual(set(got["primary"]), {"used_percent", "limit_window_seconds", "reset_at"})
+        self.assertEqual(got["primary"]["used_percent"], 34)
+        self.assertEqual(got["primary"]["limit_window_seconds"], WEEK)
+        self.assertEqual(got["primary"]["reset_at"], self.reset_at)
+        self.assertIsNone(got["secondary"])
+        blob = json.dumps(got, ensure_ascii=False)
+        for s in OFFICIAL_SECRETS:
+            self.assertNotIn(s, blob)
+        self.assertNotIn("additional_rate_limits", blob)
+        self.assertNotIn("credits", blob)
+
+    def test_fetch_keeps_secondary_window_numbers(self):
+        sec = {"used_percent": 12.5, "limit_window_seconds": 18000,
+               "reset_at": self.now + 3600, "reset_after_seconds": 10}
+        body = self.official_body(used=34, reset_at=self.reset_at, secondary=sec)
+        got = self.m.fetch_official(auth_path=self.auth, fetcher=fake_fetcher(body=body))
+        self.assertEqual(got["secondary"],
+                         {"used_percent": 12.5, "limit_window_seconds": 18000,
+                          "reset_at": self.now + 3600})
+
+    def test_fetch_targets_chatgpt_only_with_auth_headers(self):
+        log = []
+        self.m.fetch_official(auth_path=self.auth, timeout_sec=7,
+                              fetcher=fake_fetcher(body=self.official_body(reset_at=self.reset_at),
+                                                   log=log))
+        self.assertEqual(len(log), 1)
+        self.assertTrue(log[0]["url"].startswith("https://chatgpt.com/"), log[0]["url"])
+        h = log[0]["headers"]
+        self.assertEqual(h["Authorization"], f"Bearer {OFFICIAL_TOKEN}")
+        self.assertEqual(h["chatgpt-account-id"], OFFICIAL_ACCOUNT)
+        self.assertEqual(log[0]["timeout"], 7)
+
+    def _assert_error(self, fetcher=None, auth="ok", contains=None):
+        auth_path = self.codex_home(auth)
+        with self.assertRaises(self.m.OfficialError) as cm:
+            self.m.fetch_official(auth_path=auth_path,
+                                  fetcher=fetcher or fake_fetcher(body=self.official_body()))
+        msg = str(cm.exception)
+        for s in OFFICIAL_SECRETS:
+            self.assertNotIn(s, msg, f"例外メッセージにトークン・識別子が漏れている: {msg}")
+        if contains:
+            self.assertIn(contains, msg)
+        return msg
+
+    def test_fetch_401_message_has_no_token(self):
+        body = json.dumps({"detail": "invalid token", "access_token": OFFICIAL_TOKEN,
+                           "email": OFFICIAL_EMAIL})
+        msg = self._assert_error(fetcher=fake_fetcher(status=401, body=body), contains="401")
+        self.assertIn("codex", msg)
+
+    def test_fetch_timeout(self):
+        self._assert_error(fetcher=fake_fetcher(exc=TimeoutError("timed out")),
+                           contains="タイムアウト")
+
+    def test_fetch_unexpected_exception_is_wrapped(self):
+        boom = RuntimeError(f"leak {OFFICIAL_TOKEN} {OFFICIAL_EMAIL}")
+        self._assert_error(fetcher=fake_fetcher(exc=boom))
+
+    def test_fetch_bad_json(self):
+        self._assert_error(fetcher=fake_fetcher(body="これは JSON ではない"), contains="JSON")
+
+    def test_fetch_missing_primary_window(self):
+        body = {"plan_type": "pro", "rate_limit": {"secondary_window": None}}
+        self._assert_error(fetcher=fake_fetcher(body=body), contains="primary_window")
+
+    def test_fetch_non_numeric_used_percent(self):
+        body = self.official_body(used="たくさん", reset_at=self.reset_at)
+        self._assert_error(fetcher=fake_fetcher(body=body), contains="primary_window")
+
+    def test_auth_missing(self):
+        self._assert_error(auth="missing", contains="auth.json")
+
+    def test_auth_broken(self):
+        self._assert_error(auth="broken", contains="auth.json")
+
+    def test_auth_without_tokens_key(self):
+        self._assert_error(auth="no_tokens", contains="tokens")
+
+    def test_auth_without_access_token(self):
+        self._assert_error(auth="empty_tokens", contains="access_token")
+
+    def test_plan_type_is_sanitized(self):
+        body = self.official_body(reset_at=self.reset_at)
+        body["plan_type"] = "pro " + OFFICIAL_EMAIL
+        got = self.m.fetch_official(auth_path=self.auth, fetcher=fake_fetcher(body=body))
+        self.assertIsNone(got["plan_type"])
+
+    # --- sample_official -----------------------------------------------------
+    def test_sample_writes_numbers_only(self):
+        path = self.official_samples_path()
+        got = self.m.sample_official(
+            auth_path=self.auth, samples_path=path, now=self.now,
+            cfg={"min_interval_sec": 900},
+            fetcher=fake_fetcher(body=self.official_body(used=34, reset_at=self.reset_at)))
+        self.assertIsNotNone(got)
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        self.assertEqual(len(lines), 1)
+        rec = json.loads(lines[0])
+        self.assertEqual(set(rec), {"ts", "plan_type", "primary", "secondary"})
+        self.assertEqual(rec["ts"], self.now)
+        self.assert_no_secrets(path.read_text(encoding="utf-8"))
+
+    def test_sample_throttle_and_force(self):
+        path = self.official_samples_path()
+        f = fake_fetcher(body=self.official_body(used=34, reset_at=self.reset_at))
+        cfg = {"min_interval_sec": 900}
+        self.m.sample_official(auth_path=self.auth, samples_path=path, now=self.now,
+                               cfg=cfg, fetcher=f)
+        # 直後の 2 回目はスロットルされる
+        self.assertIsNone(self.m.sample_official(auth_path=self.auth, samples_path=path,
+                                                 now=self.now + 10, cfg=cfg, fetcher=f))
+        self.assertEqual(len(path.read_text(encoding="utf-8").strip().split("\n")), 1)
+        # --force 相当は無視して書く
+        self.assertIsNotNone(self.m.sample_official(auth_path=self.auth, samples_path=path,
+                                                    now=self.now + 20, cfg=cfg, force=True,
+                                                    fetcher=f))
+        self.assertEqual(len(path.read_text(encoding="utf-8").strip().split("\n")), 2)
+        # 間隔を超えれば通常経路でも書く
+        self.assertIsNotNone(self.m.sample_official(auth_path=self.auth, samples_path=path,
+                                                    now=self.now + 2000, cfg=cfg, fetcher=f))
+        self.assertEqual(len(path.read_text(encoding="utf-8").strip().split("\n")), 3)
+
+    def test_sample_ignores_broken_last_line(self):
+        path = self.official_samples_path()
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text("壊れた行\n", encoding="utf-8")
+        got = self.m.sample_official(
+            auth_path=self.auth, samples_path=path, now=self.now, cfg={"min_interval_sec": 900},
+            fetcher=fake_fetcher(body=self.official_body(reset_at=self.reset_at)))
+        self.assertIsNotNone(got)
+
+    # --- 想定外入力（読取 / デコード / パースの 3 層） -----------------------
+    def test_fetch_survives_hostile_bodies(self):
+        """空・巨大整数リテラル・深いネスト・巨大本文・非 JSON でも例外型は OfficialError。"""
+        bodies = [
+            "",
+            "null",
+            "[]",
+            json.dumps({"rate_limit": {"primary_window": {"used_percent": 1}}}),  # 数値欠落
+            '{"plan_type": ' + "1" * 5000 + "}",           # 巨大整数リテラル -> ValueError
+            "[" * 2000 + "]" * 2000,                        # 深いネスト -> RecursionError
+            "あ" * 200_000,                                  # 巨大な非 JSON
+            '{"rate_limit": {"primary_window": null}}',
+        ]
+        for b in bodies:
+            with self.assertRaises(self.m.OfficialError, msg=f"落ちなかった本文: {b[:40]}"):
+                self.m.fetch_official(auth_path=self.auth, fetcher=fake_fetcher(body=b))
+
+    def test_auth_with_hostile_content(self):
+        home = self.tmp / "codexhome"
+        home.mkdir(exist_ok=True)
+        self.env["CODEX_HOME"] = str(home)
+        p = home / "auth.json"
+        for content in (b"", b"\xff\xfe\x00\x01binary", ("1" * 5000).encode(),
+                        b"[" * 2000 + b"]" * 2000, '{"tokens": "文字列"}'.encode("utf-8"),
+                        b'{"tokens": {"access_token": 12345, "account_id": null}}'):
+            p.write_bytes(content)
+            with self.assertRaises(self.m.OfficialError, msg=f"落ちなかった: {content[:20]!r}"):
+                self.m.fetch_official(auth_path=p,
+                                      fetcher=fake_fetcher(body=self.official_body()))
+
+    def test_samples_file_with_hostile_lines(self):
+        path = self.official_samples_path()
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            "\n".join([
+                "",
+                "壊れた行",
+                "1" * 5000,                                    # 巨大整数リテラル
+                "[" * 2000 + "]" * 2000,                       # 深いネスト
+                json.dumps([1, 2, 3]),                         # dict でない
+                json.dumps({"ts": "きのう", "primary": {}}),     # ts が数値でない
+                json.dumps({"ts": 1, "primary": "文字列"}),      # primary が dict でない
+                json.dumps({"ts": 2, "primary": {"used_percent": None}}),
+                json.dumps({"ts": 3, "plan_type": "pro",
+                            "primary": {"used_percent": 5, "limit_window_seconds": WEEK,
+                                        "reset_at": 9}, "secondary": None}),
+            ]) + "\n", encoding="utf-8")
+        got = self.m.read_official_samples(path)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["ts"], 3)
+
+    def test_cli_json_output_has_no_secrets(self):
+        self.enable_official()  # CLI も config の enabled に従う（無効なら取得しない）
+        self.set_fixture(body=self.official_body(used=34, reset_at=self.reset_at))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "codex_official.py"), "--json", "--force"],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        out = json.loads(p.stdout)
+        self.assertEqual(out["primary"]["used_percent"], 34)
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+    def test_cli_failure_exits_1_without_secrets(self):
+        self.enable_official()
+        self.codex_home("missing")
+        self.set_fixture(body=self.official_body(reset_at=self.reset_at))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "codex_official.py"), "--force"],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 1)
+        self.assertIn("auth.json", p.stderr)
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+
+class TestCodexOfficialRefresh(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """pace_refresh.py への組み込み（サブプロセス実行・応答はフィクスチャ注入）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1_755_000_000
+        self.reset_at = self.now + WEEK // 2  # 公式窓の 50% が経過した状態
+        self.codex_home("ok")
+        self.enable_official()
+
+    def prepare(self, used=34, ledger=True, samples=True):
+        self.standard_fixture(self.now)
+        if samples:
+            self.write_samples([self.sample(self.now - 30, 41.2, self.now + WEEK // 2)])
+        if ledger:
+            self.standard_ledger(self.now)
+        self.set_fixture(body=self.official_body(used=used, reset_at=self.reset_at))
+
+    def test_official_in_cache_with_calibration(self):
+        self.prepare(used=34)
+        p = self.run_refresh("--now", str(self.now))
+        cx = self.read_cache()["codex"]
+        o = cx["official"]
+        self.assertEqual(set(o), {"used_pct", "window_start", "reset_at", "elapsed_ratio",
+                                  "pace", "projected_end_pct", "plan_type", "sampled_at",
+                                  "stale", "secondary"})
+        self.assertAlmostEqual(o["used_pct"], 34.0)
+        self.assertEqual(o["window_start"], self.reset_at - WEEK)
+        self.assertEqual(o["reset_at"], self.reset_at)
+        self.assertAlmostEqual(o["elapsed_ratio"], 0.5, places=6)
+        self.assertAlmostEqual(o["pace"], 0.68, places=6)
+        self.assertAlmostEqual(o["projected_end_pct"], 68.0, places=6)
+        self.assertEqual(o["plan_type"], "pro")
+        self.assertFalse(o["stale"])
+        # 台帳 100.55cr / 0.34 = 295.735…
+        self.assertAlmostEqual(cx["weekly_cap_est"], 100.55 / 0.34, places=3)
+        self.assertEqual(cx["cap_source"], "estimated")
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+    def test_manual_cap_takes_precedence(self):
+        self.prepare(used=34)
+        cfg_path = self.root / "config" / "config.json"
+        cfg = json.loads(cfg_path.read_text(encoding="utf-8"))
+        cfg["budget"]["pace"]["codex_weekly_credits"] = 300
+        cfg_path.write_text(json.dumps(cfg, ensure_ascii=False), encoding="utf-8")
+        self.run_refresh("--now", str(self.now))
+        cx = self.read_cache()["codex"]
+        self.assertEqual(cx["cap_source"], "manual")
+        self.assertEqual(cx["weekly_cap"], 300)
+        self.assertIsNotNone(cx["weekly_cap_est"])
+
+    def test_used_percent_zero_gives_no_calibration(self):
+        self.prepare(used=0)
+        self.run_refresh("--now", str(self.now))
+        cx = self.read_cache()["codex"]
+        self.assertEqual(cx["official"]["used_pct"], 0.0)
+        self.assertIsNone(cx["weekly_cap_est"])
+        self.assertTrue(any("較正" in n for n in cx["notes"]), cx["notes"])
+
+    def test_official_window_replaces_approximation(self):
+        """公式窓があるときは Claude の seven_day 窓ではなく公式窓で台帳を集計する。"""
+        self.standard_fixture(self.now)
+        self.write_samples([self.sample(self.now - 30, 41.2, self.now + WEEK // 2)])
+        # 公式窓は now-1日 開始（reset_at = now + 6日 / 窓 7日）。
+        reset_at = self.now + 6 * 24 * 3600
+        self.set_fixture(body=self.official_body(used=34, reset_at=reset_at))
+        self.write_codex_ledger([
+            codex_row(iso(self.now - 3 * 24 * 3600), model="gpt-5.6-sol",
+                      inp=10, out=10, credits_est=50.0),   # 公式窓の外（Claude 窓の中）
+            codex_row(iso(self.now - 3600), model="gpt-5.6-sol",
+                      inp=10, out=10, credits_est=7.0),    # 公式窓の中
+        ])
+        self.run_refresh("--now", str(self.now))
+        cx = self.read_cache()["codex"]
+        self.assertAlmostEqual(cx["window_credits"], 7.0, places=6)
+        self.assertEqual(cx["window_start"], reset_at - WEEK)
+        self.assertFalse(any("近似" in n for n in cx["notes"]), cx["notes"])
+        self.assertTrue(any("公式窓" in n for n in cx["notes"]), cx["notes"])
+
+    def test_stale_sample_is_flagged_and_not_refetched(self):
+        self.standard_fixture(self.now)
+        self.write_samples([self.sample(self.now - 30, 41.2, self.now + WEEK // 2)])
+        self.standard_ledger(self.now)
+        self.write_official_sample(self.now - 40000, used=34, reset_at=self.reset_at)
+        # スロットルで再取得しない（フィクスチャも auth も与えない＝取得すれば失敗する）
+        self.enable_official(min_interval_sec=999999)
+        self.codex_home("missing")
+        self.run_refresh("--now", str(self.now))
+        o = self.read_cache()["codex"]["official"]
+        self.assertTrue(o["stale"])
+        self.assertEqual(o["sampled_at"], self.now - 40000)
+        self.assertEqual(len(self.official_samples_path().read_text().strip().split("\n")), 1)
+
+    def test_official_without_claude_samples(self):
+        """Claude 側のサンプルが無くても公式窓だけで Codex 節を出す。"""
+        self.prepare(samples=False)
+        self.run_refresh("--now", str(self.now))
+        c = self.read_cache()
+        self.assertIsNone(c["seven_day"])
+        self.assertIsNotNone(c["codex"])
+        self.assertAlmostEqual(c["codex"]["official"]["used_pct"], 34.0)
+
+    def test_official_without_ledger(self):
+        self.prepare(ledger=False)
+        self.run_refresh("--now", str(self.now))
+        cx = self.read_cache()["codex"]
+        self.assertEqual(cx["window_credits"], 0.0)
+        self.assertIsNotNone(cx["official"])
+        self.assertIsNone(cx["weekly_cap_est"])
+        self.assertTrue(any("台帳" in n for n in cx["notes"]), cx["notes"])
+
+    # --- 失敗系: refresh は落ちない -----------------------------------------
+    def _assert_survives(self, note_word="公式"):
+        p = self.run_refresh("--now", str(self.now))
+        c = self.read_cache()
+        self.assertIsNone(c.get("error"))
+        cx = c.get("codex")
+        if cx:
+            self.assertIsNone(cx.get("official"))
+        notes = list(c.get("notes") or []) + list((cx or {}).get("notes") or [])
+        self.assertTrue(any(note_word in n for n in notes), notes)
+        self.assert_no_secrets(p.stdout, p.stderr)
+        return notes
+
+    def test_auth_missing_survives(self):
+        self.prepare()
+        self.codex_home("missing")
+        notes = self._assert_survives()
+        self.assertTrue(any("auth.json" in n for n in notes), notes)
+
+    def test_auth_broken_survives(self):
+        self.prepare()
+        self.codex_home("broken")
+        self._assert_survives()
+
+    def test_auth_without_tokens_survives(self):
+        self.prepare()
+        self.codex_home("no_tokens")
+        self._assert_survives()
+
+    def test_http_401_survives(self):
+        self.prepare()
+        self.set_fixture(status=401, body=json.dumps({"detail": "unauthorized",
+                                                      "email": OFFICIAL_EMAIL}))
+        notes = self._assert_survives()
+        self.assertTrue(any("401" in n for n in notes), notes)
+
+    def test_timeout_survives(self):
+        self.prepare()
+        self.set_fixture(error="timeout")
+        self._assert_survives()
+
+    def test_bad_json_survives(self):
+        self.prepare()
+        self.set_fixture(body="<html>maintenance</html>")
+        self._assert_survives()
+
+    def test_disabled_does_not_sample(self):
+        self.prepare()
+        self.enable_official(enabled=False)
+        self.run_refresh("--now", str(self.now))
+        cx = self.read_cache()["codex"]
+        self.assertIsNone(cx["official"])
+        self.assertFalse(self.official_samples_path().exists())
+        self.assertTrue(any("近似" in n for n in cx["notes"]), cx["notes"])
+
+
+class TestCodexOfficialStatusline(CodexOfficialMixin, CodexLedgerMixin,
+                                  StatuslineMixin, PaceTestBase):
+    def codex_value(self, official=None, **over):
+        v = {"window_credits": 100.55, "window_jobs": 3, "five_hour_credits": 12.5,
+             "five_hour_jobs": 1, "by_model": {}, "weekly_cap": None, "used_pct": None,
+             "pace": None, "projected_end_pct": None, "weekly_cap_est": None,
+             "cap_source": None, "official": official,
+             "ledger_path": str(self.codex_ledger), "ignored_rows": 4, "notes": []}
+        v.update(over)
+        return v
+
+    def official_value(self, used=12.0, elapsed=0.34, pace=0.35, stale=False):
+        return {"used_pct": used, "window_start": self.NOW - 100, "reset_at": self.NOW + 100,
+                "elapsed_ratio": elapsed, "pace": pace,
+                "projected_end_pct": used / elapsed if elapsed else None,
+                "plan_type": "pro", "sampled_at": self.NOW - 60, "stale": stale,
+                "secondary": None}
+
+    def test_official_segment(self):
+        self.write_cache(codex=self.codex_value(official=self.official_value()))
+        out = self.run_sl(self.payload())
+        self.assertIn("🅒 12%/34% ·0.35", out)
+        self.assertNotIn("cr", out)
+        self.assertIn("📅W 41%/50%", out)  # 既存セグメントは不変
+
+    def test_official_segment_color_follows_band(self):
+        # pace 0.35 は band 下限未満 -> 薄色
+        self.write_cache(codex=self.codex_value(official=self.official_value()))
+        self.assertIn("\033[2m🅒 12%/34%", self.run_sl(self.payload()))
+        # pace 0.90 は band 内 -> 緑
+        self.write_cache(codex=self.codex_value(
+            official=self.official_value(used=45.0, elapsed=0.5, pace=0.9)))
+        self.assertIn("\033[32m🅒 45%/50% ·0.90", self.run_sl(self.payload()))
+        # pace 1.2 は band 超過だが枯渇時点は窓の 83% 経過（margin 80 より後）-> 黄
+        self.write_cache(codex=self.codex_value(
+            official=self.official_value(used=60.0, elapsed=0.5, pace=1.2)))
+        self.assertIn("\033[33m🅒 60%/50% ·1.20", self.run_sl(self.payload()))
+        # pace 1.5・枯渇時点が窓の 67% 経過（margin 80 より前）-> 赤
+        self.write_cache(codex=self.codex_value(
+            official=self.official_value(used=30.0, elapsed=0.2, pace=1.5)))
+        self.assertIn("\033[31m🅒 30%/20% ·1.50", self.run_sl(self.payload()))
+
+    def test_official_stale_is_dimmed_with_suffix(self):
+        self.write_cache(codex=self.codex_value(official=self.official_value(stale=True)))
+        out = self.run_sl(self.payload())
+        self.assertIn("\033[2m🅒 12%/34% ·0.35?", out)
+
+    def test_without_official_is_byte_identical(self):
+        """official が無いときの出力は現行（クレジット表示）と 1 バイトも変わらない。"""
+        v = self.codex_value()
+        del v["official"]
+        del v["weekly_cap_est"]
+        del v["cap_source"]
+        self.write_cache(codex=v)
+        legacy = self.run_sl(self.payload())
+        self.write_cache(codex=self.codex_value(official=None))
+        with_null = self.run_sl(self.payload())
+        self.assertEqual(legacy.encode(), with_null.encode())
+        self.assertIn("🅒 101cr", legacy)
+
+    def test_statusline_makes_no_network_call(self):
+        """statusline 自体はサンプリングしない（公式サンプルファイルを作らない）。"""
+        self.write_cache(codex=self.codex_value(official=self.official_value()))
+        self.run_sl(self.payload())
+        self.assertFalse(self.official_samples_path().exists())
+
+
+class TestCodexOfficialInPaceReport(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    def test_report_shows_official_line(self):
+        now = 1_755_000_000
+        reset_at = now + WEEK // 2
+        self.standard_fixture(now)
+        self.write_samples([self.sample(now - 30, 41.2, now + WEEK // 2)])
+        self.standard_ledger(now)
+        self.codex_home("ok")
+        self.enable_official()
+        self.set_fixture(body=self.official_body(used=34, reset_at=reset_at))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pace_report.py"), "--refresh", "--now", str(now)],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("公式", p.stdout)
+        self.assertIn("used 34%", p.stdout)
+        self.assertIn("0.68", p.stdout)
+        self.assertIn("pro", p.stdout)
+        self.assertIn("weekly_cap_est", p.stdout)
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+
+# ---------------------------------------------------------------------------
+# codex-official の反証レビュー指摘（H1 / M2〜M5 / L6〜L11）の再現テスト
+# ---------------------------------------------------------------------------
+
+
+class TestCodexOfficialHostileWindow(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """H1: 窓の極端値で refresh 全体を落とさない（Claude 側集計を巻き添えにしない）。"""
+
+    def setUp(self):
+        super().setUp()
+        self.now = 1_755_000_000
+        self.reset_at = self.now + WEEK // 2
+        self.codex_home("ok")
+        self.enable_official()
+        self.standard_fixture(self.now)
+        self.write_samples([self.sample(self.now - 30, 41.2, self.now + WEEK // 2)])
+        self.standard_ledger(self.now)
+
+    def _assert_refresh_survives(self):
+        p = self.run_refresh("--now", str(self.now))
+        c = self.read_cache()
+        self.assertIsNone(c.get("error"))
+        # Claude 側の集計が残っていること（Codex の不正窓に巻き込まれない）
+        self.assertIsNotNone(c.get("seven_day"))
+        self.assertAlmostEqual(c["seven_day"]["used"], 41.2)
+        cx = c.get("codex")
+        self.assertIsNotNone(cx)
+        self.assertIsNone(cx.get("official"))
+        notes = list(c.get("notes") or []) + list(cx.get("notes") or [])
+        self.assertTrue(any("窓が不正" in n for n in notes), notes)
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+    # --- 取得経路（フィクスチャ応答） ---------------------------------------
+    def test_window_seconds_1e12_from_response(self):
+        self.set_fixture(body=self.official_body(used=34, reset_at=self.reset_at, window=1e12))
+        self._assert_refresh_survives()
+
+    def test_window_seconds_1e300_from_response(self):
+        self.set_fixture(body=self.official_body(used=34, reset_at=self.reset_at, window=1e300))
+        self._assert_refresh_survives()
+
+    def test_window_seconds_microseconds_from_response(self):
+        self.set_fixture(body=self.official_body(used=34, reset_at=self.reset_at,
+                                                 window=WEEK * 1_000_000))
+        self._assert_refresh_survives()
+
+    # --- サンプルファイル経路（既に書かれた不正行） -------------------------
+    def _write_raw_sample(self, ts, used, window, reset_at):
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        line = json.dumps({"ts": ts, "plan_type": "pro",
+                           "primary": {"used_percent": used, "limit_window_seconds": window,
+                                       "reset_at": reset_at},
+                           "secondary": None})
+        with open(self.official_samples_path(), "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+
+    def _no_refetch(self):
+        """再取得させない（スロットル + auth 無し）。既存の悪いサンプルだけを読ませる。"""
+        self.enable_official(min_interval_sec=999999)
+        self.codex_home("missing")
+
+    def test_sample_window_nan(self):
+        self._write_raw_sample(self.now - 60, 34, float("nan"), self.reset_at)
+        self._no_refetch()
+        self._assert_refresh_survives()
+
+    def test_sample_window_infinity(self):
+        self._write_raw_sample(self.now - 60, 34, float("inf"), self.reset_at)
+        self._no_refetch()
+        self._assert_refresh_survives()
+
+    def test_sample_nanosecond_units(self):
+        self._write_raw_sample(self.now - 60, 34, WEEK * 1_000_000_000,
+                               self.reset_at * 1_000_000_000)
+        self._no_refetch()
+        self._assert_refresh_survives()
+
+    def test_bad_sample_does_not_linger_as_last_line(self):
+        """不正行は読み側でスキップされ、手前の有効サンプルが使われる。"""
+        self.write_official_sample(self.now - 120, used=34, reset_at=self.reset_at)
+        self._write_raw_sample(self.now - 60, 34, float("nan"), self.reset_at)
+        self._no_refetch()
+        self.run_refresh("--now", str(self.now))
+        o = self.read_cache()["codex"]["official"]
+        self.assertIsNotNone(o)
+        self.assertEqual(o["sampled_at"], self.now - 120)
+
+
+class TestCodexOfficialWallClock(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """M2: timeout_sec は 1 操作あたり。全体は `timeout_sec * 3` の壁時計で打ち切る。"""
+
+    def setUp(self):
+        super().setUp()
+        self.m = official_mod()
+        self.now = 1_755_000_000
+        self.auth = self.codex_home("ok")
+
+    def test_fetch_gives_up_at_overall_deadline(self):
+        def slow(url, headers, timeout):
+            time.sleep(10)
+            return 200, "{}"
+
+        t0 = time.monotonic()
+        with self.assertRaises(self.m.OfficialError) as cm:
+            self.m.fetch_official(auth_path=self.auth, timeout_sec=0.2, fetcher=slow)
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 5.0, f"壁時計の見張りが効いていない（{elapsed:.1f} 秒）")
+        self.assertIn("期限", str(cm.exception))
+        for s in OFFICIAL_SECRETS:
+            self.assertNotIn(s, str(cm.exception))
+
+    def test_sample_official_gives_up_at_overall_deadline(self):
+        def slow(url, headers, timeout):
+            time.sleep(10)
+            return 200, "{}"
+
+        t0 = time.monotonic()
+        with self.assertRaises(self.m.OfficialError):
+            self.m.sample_official(auth_path=self.auth, samples_path=self.official_samples_path(),
+                                   now=self.now, cfg={"min_interval_sec": 0, "timeout_sec": 0.2},
+                                   fetcher=slow)
+        self.assertLess(time.monotonic() - t0, 5.0)
+        self.assertFalse(self.official_samples_path().exists())
+
+    def test_refresh_completes_with_slow_fetcher(self):
+        """遅い応答でも refresh は期限内に完走し、注記 1 行で続行する。"""
+        self.enable_official(timeout_sec=0.3)
+        self.standard_fixture(self.now)
+        self.write_samples([self.sample(self.now - 30, 41.2, self.now + WEEK // 2)])
+        f = self.tmp / "official_fixture.json"
+        f.write_text(json.dumps({"sleep": 10, "status": 200, "body": "{}"}), encoding="utf-8")
+        self.env["FCM_CODEX_OFFICIAL_FIXTURE"] = str(f)
+        t0 = time.monotonic()
+        p = self.run_refresh("--now", str(self.now))
+        elapsed = time.monotonic() - t0
+        self.assertLess(elapsed, 9.0, f"refresh が遅い応答で待たされている（{elapsed:.1f} 秒）")
+        c = self.read_cache()
+        self.assertIsNone(c.get("error"))
+        self.assertIsNotNone(c.get("seven_day"))
+        notes = list(c.get("notes") or [])
+        self.assertTrue(any("公式" in n for n in notes), notes)
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+
+class TestCodexOfficialFixtureIsAnnounced(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """M3: フィクスチャ応答は無警告に効かせない。"""
+
+    def test_fixture_marks_sample_and_notes(self):
+        now = 1_755_000_000
+        self.codex_home("ok")
+        self.enable_official()
+        self.standard_fixture(now)
+        self.write_samples([self.sample(now - 30, 41.2, now + WEEK // 2)])
+        self.set_fixture(body=self.official_body(used=34, reset_at=now + WEEK // 2))
+        self.run_refresh("--now", str(now))
+        rec = json.loads(self.official_samples_path().read_text(
+            encoding="utf-8").strip().split("\n")[-1])
+        self.assertTrue(rec.get("fixture"))
+        c = self.read_cache()
+        notes = list(c.get("notes") or [])
+        self.assertTrue(any("フィクスチャ" in n for n in notes), notes)
+        # フィクスチャ行でも official 表示自体は出る
+        self.assertIsNotNone(c["codex"]["official"])
+
+
+class TestCodexOfficialReportWithoutClaudeSamples(CodexOfficialMixin, CodexLedgerMixin,
+                                                  PaceTestBase):
+    """M4: Claude サンプルが無くても Codex 節（公式行）を出して exit 0。"""
+
+    def test_report_renders_codex_section(self):
+        now = 1_755_000_000
+        self.codex_home("ok")
+        self.enable_official()
+        self.standard_fixture(now)
+        self.standard_ledger(now)
+        self.set_fixture(body=self.official_body(used=34, reset_at=now + WEEK // 2))
+        self.run_refresh("--now", str(now))
+        self.assertIsNone(self.read_cache()["seven_day"])
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pace_report.py"), "--now", str(now)],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr + p.stdout)
+        self.assertIn("公式", p.stdout)
+        self.assertIn("used 34%", p.stdout)
+        self.assertIn("Claude 側", p.stdout)
+        self.assert_no_secrets(p.stdout, p.stderr)
+
+    def test_report_without_any_data_still_exits_3(self):
+        now = 1_755_000_000
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pace_report.py"), "--now", str(now)],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 3)
+
+
+class TestCodexOfficialNonWeekWindow(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """M5: 公式窓が 7 日以外でも台帳側 pace の分母は公式窓幅。"""
+
+    def test_three_day_window_paces_match(self):
+        now = 1_755_000_000
+        span = 3 * 24 * 3600
+        reset_at = now + span // 2  # 3 日窓の 50% 経過
+        self.codex_home("ok")
+        self.enable_official()
+        self.standard_fixture(now)
+        self.write_samples([self.sample(now - 30, 41.2, now + WEEK // 2)])
+        self.write_codex_ledger([
+            codex_row(iso(now - 3600), model="gpt-5.6-sol", inp=10, out=10, credits_est=20.0),
+        ])
+        self.set_fixture(body=self.official_body(used=34, reset_at=reset_at, window=span))
+        self.run_refresh("--now", str(now))
+        cx = self.read_cache()["codex"]
+        o = cx["official"]
+        self.assertAlmostEqual(o["elapsed_ratio"], 0.5, places=6)
+        self.assertEqual(cx["cap_source"], "estimated")
+        self.assertAlmostEqual(cx["pace"], o["pace"], places=6)
+        self.assertAlmostEqual(cx["projected_end_pct"], o["projected_end_pct"], places=6)
+
+
+class TestCodexOfficialSampleFileHygiene(CodexOfficialMixin, PaceTestBase):
+    """L7 / L8: 後方読み・ローテーション・ts の範囲検証。"""
+
+    def setUp(self):
+        super().setUp()
+        self.m = official_mod()
+        self.now = 1_755_000_000
+        self.auth = self.codex_home("ok")
+
+    def test_read_returns_only_last_valid_record(self):
+        path = self.official_samples_path()
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for ts in (self.now - 300, self.now - 200):
+                f.write(json.dumps({"ts": ts, "plan_type": "pro",
+                                    "primary": {"used_percent": 1, "limit_window_seconds": WEEK,
+                                                "reset_at": self.now + WEEK},
+                                    "secondary": None}) + "\n")
+            f.write("壊れた行\n")
+        got = self.m.read_official_samples(path)
+        self.assertEqual(len(got), 1)
+        self.assertEqual(got[0]["ts"], self.now - 200)
+
+    def test_invalid_ts_rows_are_skipped_and_not_throttled(self):
+        path = self.official_samples_path()
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        with open(path, "w", encoding="utf-8") as f:
+            for ts in (0, -1, 2 ** 31, self.now * 1000, float("nan")):
+                f.write(json.dumps({"ts": ts, "plan_type": "pro",
+                                    "primary": {"used_percent": 1, "limit_window_seconds": WEEK,
+                                                "reset_at": self.now + WEEK},
+                                    "secondary": None}) + "\n")
+        self.assertEqual(self.m.read_official_samples(path), [])
+        # 不正 ts をスロットル判定に使わない（= 取得が走る）
+        got = self.m.sample_official(
+            auth_path=self.auth, samples_path=path, now=self.now,
+            cfg={"min_interval_sec": 999999},
+            fetcher=fake_fetcher(body=self.official_body(used=34, reset_at=self.now + WEEK)))
+        self.assertIsNotNone(got)
+        self.assertEqual(len(self.m.read_official_samples(path)), 1)
+
+    def test_invalid_window_rows_are_skipped(self):
+        path = self.official_samples_path()
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        bad = [
+            {"limit_window_seconds": 0, "reset_at": self.now + WEEK},
+            {"limit_window_seconds": -WEEK, "reset_at": self.now + WEEK},
+            {"limit_window_seconds": float("nan"), "reset_at": self.now + WEEK},
+            {"limit_window_seconds": float("inf"), "reset_at": self.now + WEEK},
+            {"limit_window_seconds": WEEK * 1_000_000, "reset_at": self.now + WEEK},
+            {"limit_window_seconds": WEEK, "reset_at": self.now * 1_000_000},
+            {"limit_window_seconds": WEEK, "reset_at": 0},
+        ]
+        with open(path, "w", encoding="utf-8") as f:
+            for b in bad:
+                f.write(json.dumps({"ts": self.now - 10, "plan_type": "pro",
+                                    "primary": {"used_percent": 1, **b},
+                                    "secondary": None}) + "\n")
+        self.assertEqual(self.m.read_official_samples(path), [])
+
+    def test_rotation_halves_oversized_file(self):
+        path = self.official_samples_path()
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        n = 5100
+        with open(path, "w", encoding="utf-8") as f:
+            for i in range(n):
+                f.write(json.dumps({"ts": self.now - n + i, "plan_type": "pro",
+                                    "primary": {"used_percent": 1, "limit_window_seconds": WEEK,
+                                                "reset_at": self.now + WEEK},
+                                    "secondary": None}) + "\n")
+        got = self.m.sample_official(
+            auth_path=self.auth, samples_path=path, now=self.now, force=True,
+            fetcher=fake_fetcher(body=self.official_body(used=34, reset_at=self.now + WEEK)))
+        self.assertIsNotNone(got)
+        lines = path.read_text(encoding="utf-8").strip().split("\n")
+        self.assertLess(len(lines), n)
+        self.assertGreater(len(lines), 100)
+        # 最新サンプルは残る
+        self.assertEqual(json.loads(lines[-1])["ts"], self.now)
+        self.assertEqual(self.m.read_official_samples(path)[0]["ts"], self.now)
+
+
+class TestCodexOfficialDisabled(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """L9 / L10: 無効化の扱い（CLI も従う・真偽値のみ真）。"""
+
+    def test_cli_refuses_when_disabled(self):
+        self.codex_home("ok")
+        self.set_fixture(body=self.official_body(used=34, reset_at=1_755_000_000 + WEEK))
+        for extra in ([], ["--force"]):
+            p = subprocess.run(
+                [sys.executable, str(SCRIPTS / "codex_official.py"), *extra],
+                env=self.env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 1, p.stdout + p.stderr)
+            self.assertIn("無効化", p.stderr)
+            self.assertFalse(self.official_samples_path().exists())
+
+    def test_string_enabled_is_false_with_warning(self):
+        now = 1_755_000_000
+        self.codex_home("ok")
+        self.enable_official(enabled="false")
+        self.standard_fixture(now)
+        self.write_samples([self.sample(now - 30, 41.2, now + WEEK // 2)])
+        self.standard_ledger(now)
+        self.set_fixture(body=self.official_body(used=34, reset_at=now + WEEK // 2))
+        self.run_refresh("--now", str(now))
+        c = self.read_cache()
+        self.assertIsNone(c["codex"]["official"])
+        self.assertFalse(self.official_samples_path().exists())
+        notes = list(c.get("notes") or []) + list(c["codex"].get("notes") or [])
+        self.assertTrue(any("enabled" in n for n in notes), notes)
+
+    def test_truthy_string_enabled_is_also_false(self):
+        now = 1_755_000_000
+        self.codex_home("ok")
+        self.enable_official(enabled="true")
+        self.standard_fixture(now)
+        self.write_samples([self.sample(now - 30, 41.2, now + WEEK // 2)])
+        self.set_fixture(body=self.official_body(used=34, reset_at=now + WEEK // 2))
+        self.run_refresh("--now", str(now))
+        self.assertFalse(self.official_samples_path().exists())
+
+
+class TestPaceRefreshArgValidationOrder(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """L11: 引数検証は official_lane（ネットワーク）より前。"""
+
+    def test_bad_resets_at_fails_before_sampling(self):
+        now = 1_755_000_000
+        self.codex_home("ok")
+        self.enable_official()
+        self.standard_fixture(now)
+        self.set_fixture(body=self.official_body(used=34, reset_at=now + WEEK // 2))
+        p = self.run_refresh("--resets-at", "0", "--now", str(now), check=False)
+        self.assertEqual(p.returncode, 1)
+        self.assertFalse(self.official_samples_path().exists())
+
+
+class TestPaceReportHostileCache(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """H1 の同類: 壊れた cache.json の official でも表示側が落ちない。"""
+
+    def _write_cache(self, official):
+        self.pace_dir.mkdir(parents=True, exist_ok=True)
+        lib.atomic_write_json(self.pace_dir / "cache.json", {
+            "computed_at": 1_755_000_000 - 10, "duration_sec": 1.0,
+            "window": None, "seven_day": None, "fable": None, "models": {},
+            "total_usd": 0.0, "unknown_models": [], "notes": [],
+            "codex": {"window_credits": 1.0, "window_jobs": 1, "five_hour_credits": 0.0,
+                      "five_hour_jobs": 0, "by_model": {}, "weekly_cap": None,
+                      "weekly_cap_est": None, "cap_source": None, "used_pct": None,
+                      "pace": None, "projected_end_pct": None, "official": official,
+                      "ledger_path": str(self.codex_ledger), "ignored_rows": 0, "notes": []},
+        })
+
+    def test_report_survives_out_of_range_reset_at(self):
+        now = 1_755_000_000
+        for reset_at in (now * 1_000_000_000, -1, 0, 1e300):
+            self._write_cache({
+                "used_pct": 12.0, "window_start": now - 100, "reset_at": reset_at,
+                "elapsed_ratio": 0.5, "pace": 0.24, "projected_end_pct": 24.0,
+                "plan_type": "pro", "sampled_at": now - 60, "stale": False, "secondary": None,
+            })
+            p = subprocess.run(
+                [sys.executable, str(SCRIPTS / "pace_report.py"), "--now", str(now)],
+                env=self.env, capture_output=True, text=True)
+            self.assertEqual(p.returncode, 0, f"reset_at={reset_at}: {p.stderr}")
+            self.assertIn("公式", p.stdout)
+
+
+class TestCodexOfficialReportCalibrationNote(CodexOfficialMixin, CodexLedgerMixin, PaceTestBase):
+    """L6: cap_source が estimated のときの但し書き。"""
+
+    def test_estimated_cap_note(self):
+        now = 1_755_000_000
+        self.codex_home("ok")
+        self.enable_official()
+        self.standard_fixture(now)
+        self.write_samples([self.sample(now - 30, 41.2, now + WEEK // 2)])
+        self.standard_ledger(now)
+        self.set_fixture(body=self.official_body(used=34, reset_at=now + WEEK // 2))
+        p = subprocess.run(
+            [sys.executable, str(SCRIPTS / "pace_report.py"), "--refresh", "--now", str(now)],
+            env=self.env, capture_output=True, text=True)
+        self.assertEqual(p.returncode, 0, p.stderr)
+        self.assertIn("較正の定義上", p.stdout)
 
 
 if __name__ == "__main__":

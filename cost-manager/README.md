@@ -126,6 +126,8 @@ python3 scripts/cost_report.py --task "短いタスク名" --desc "今回の作�
 | `FCM_PACE_NOW` | (現在時刻) | `pace_statusline.sh` の現在時刻（epoch 秒）。テスト用。 |
 | `FCM_CODEX_LEDGER` | `budget.pace.codex_ledger`（既定 `../codex-bridge/var/codex_usage.jsonl`） | Codex 使用量台帳のパス。テスト隔離・別配置用。 |
 | `FCM_CODEX_PRICING` | `../codex-bridge/config/codex_pricing.json` | Codex の単価表（credits per MTok）。 |
+| `CODEX_HOME` | `~/.codex` | Codex 公式 usage の認証元（`$CODEX_HOME/auth.json`）。**読み取り専用**。 |
+| `FCM_CODEX_OFFICIAL_FIXTURE` | (未設定) | **テスト専用**。設定すると HTTP を発行せず、このファイルの内容（`{"status":200,"body":"…"}` / `{"error":"timeout"}` / `{"sleep":<秒>}`）を公式 usage の応答として返す。フィクスチャ由来のサンプルには `"fixture": true` が付き、pace の注記に「[テスト] フィクスチャ応答を使用」が必ず出る。 |
 
 `templates/` `scripts/` はコード資産としてスクリプト自身の実位置から解決するため、
 `FABLE_COST_MANAGER_ROOT` を差し替えるテストでも `templates/` のコピーは不要（`config/` のみコピーすれば良い）。
@@ -162,8 +164,9 @@ docs/       設計メモ
 | `·<pace>` | ペース = used / elapsed。`1.00` ちょうどがリセット時点で使い切るペース |
 | `F≈<est>%/<cap>%` | Fable の推定使用率 / 上限（既定50%）。`est = 週次枠 used × fable_usd/total_usd` |
 | `⏱5h <used>%/<elapsed>%` | 5時間枠（stdin に `five_hour` があるときだけ表示） |
-| `🅒 <credits>cr` | Codex の窓内消費クレジット（台帳があるときだけ表示・薄色） |
-| `🅒 <used>%/<elapsed>% ·<pace>` | `codex_weekly_credits` を設定したときの Codex の % とペース |
+| `🅒 <used>%/<elapsed>% ·<pace>` | Codex **公式** usage の使用率 / 公式窓の経過率 / ペース（サンプルがあるとき。色は `📅W` と同じ判定、古いサンプルは薄色 + 末尾 `?`） |
+| `🅒 <credits>cr` | 公式 usage が無いときのフォールバック: 窓内消費クレジット（台帳があるときだけ表示・薄色） |
+| `🅒 <used>%/<elapsed>% ·<pace>` | 同フォールバックで `codex_weekly_credits` を設定したときの % とペース |
 
 色は `on_pace_band`（既定 `[0.8, 1.1]`）基準で、**薄色**=余らせ気味 / **緑**=想定どおり /
 **黄**=枠超過ペース / **赤**=枠超過かつ枯渇が早い（`exhaust_margin_pct`、既定80%）。
@@ -257,7 +260,11 @@ settings.json を書き換えない。手動で設定すること）。
 | `exhaust_margin_pct` | 80 | 赤（早期枯渇）判定: 使い切り時点が窓の何%経過より前か |
 | `exclude_cwd_prefixes` | `[]` | 集計から除外する cwd の**絶対パス**リスト（`~` 可。末尾スラッシュは無視し、ディレクトリ境界で一致） |
 | `codex_ledger` | `../codex-bridge/var/codex_usage.jsonl` | Codex 使用量台帳（相対パスはスクリプトの実位置基準で解決。`~` 可） |
-| `codex_weekly_credits` | `null` | Codex の週次上限（クレジット）。`null` は「上限未設定」＝ % とペースを出さない |
+| `codex_weekly_credits` | `null` | Codex の週次上限（クレジット）。`null` は「上限未設定」。公式 usage があれば自動較正値（`weekly_cap_est`）が使われる（手動値が優先） |
+| `codex_official.enabled` | `true` | Codex 公式 usage の自動サンプリング（`false` で完全に無効。サンプルも読まず、`codex_official.py --force` でも取得しない）。**真偽値のみ**が有効（`"false"` などの文字列は偽 + 注記に型警告） |
+| `codex_official.min_interval_sec` | `900` | 公式 usage を叩く最短間隔（refresh から呼ばれるたびにスロットル判定） |
+| `codex_official.timeout_sec` | `10` | 公式 usage の HTTP タイムアウト（**1 操作あたり**。全体の壁時計上限はその 3 倍で、超過したら諦めて注記にする） |
+| `codex_official.max_age_sec` | `21600` | これより古いサンプルは `stale`（statusline で薄色 + `?`） |
 
 ## Codex 使用量レーン（codex-bridge の台帳を読む）
 
@@ -274,12 +281,63 @@ settings.json を書き換えない。手動で設定すること）。
 - **Codex の枠は「5時間窓 + 週次」で絶対値が非公開**のため、既定では % を出さない（消費クレジットと
   件数だけを出す）。実測で上限が分かったら `budget.pace.codex_weekly_credits` に設定すると
   % とペース（`🅒 34%/57% ·0.60`）が出る。
-- 窓は Claude 側の `seven_day` 窓をそのまま使う。**Codex の週次窓はリセット時刻が別なので近似**
-  （注記に明示）。5時間窓は窓終端から遡った 5 時間。
+- 窓は Codex **公式 usage**（下記）のサンプルがあればその公式窓を使う。無いときは Claude 側の
+  `seven_day` 窓をそのまま使う（**Codex の週次窓はリセット時刻が別なので近似**・注記に明示）。
+  5時間窓は窓終端から遡った 5 時間。
 - `cost_report.py` は、タスク範囲に台帳行があれば「Codex（参考）」表をレポート Markdown と
   `var/log/reports.jsonl` の `codex` キーに載せる。`--scope session`（既定）は
   `claude_session_id` が対象セッションと一致する行だけ、`--scope global` は時間窓のみで拾う。
   PNG カードは変更していない（範囲外）。
+
+## Codex 公式 used_percent の自動サンプリング（codex-official）
+
+Codex（ChatGPT プラン）の週次消費 % を、ダッシュボードを開かずに自動取得するレーン。
+これがあると statusline の `🅒` は Claude の `📅W` と同格の「% / 経過 % / ペース」になる。
+
+### 一次情報（2026-08-24 実機確認）
+
+- `GET https://chatgpt.com/backend-api/wham/usage`
+  - ヘッダ: `Authorization: Bearer <access_token>` / `chatgpt-account-id: <account_id>`。
+  - 認証情報は `$CODEX_HOME/auth.json`（既定 `~/.codex/auth.json`）の
+    `tokens.access_token` / `tokens.account_id`。**読むだけ**（書込・chmod・コピーはしない）。
+  - 応答の `rate_limit.primary_window` に `used_percent` / `limit_window_seconds` /
+    `reset_at`。週次窓は `window_start = reset_at − limit_window_seconds`。
+
+### 動きかた
+
+- サンプリングは `pace_refresh.py` からのみ（**statusline から同期ネットワークは呼ばない**）。
+  `min_interval_sec`（既定 900 秒）でスロットルし、`var/pace/codex_official_samples.jsonl` に
+  1 行追記する（5,000 行を超えたら先頭半分を切り詰める）。スロットル判定と表示に使うのは
+  **末尾から後方に読んで最初に見つかった有効行**で、`ts` や窓が範囲外の行・壊れた行は飛ばす。
+  手動確認は `python3 scripts/codex_official.py [--json] [--force]`（`enabled: false` なら
+  `--force` でも取得せず exit 1）。
+- 取得に失敗しても（auth.json 不在・401・タイムアウト・不正 JSON）refresh は落ちず、
+  `notes` に 1 行入れて続行する。サンプルが 1 件も無ければ `cache.json` の
+  `codex.official` は `null`（statusline は従来のクレジット表示へフォールバック）。
+- `max_age_sec`（既定 6 時間）より古いサンプルは `stale`（statusline で薄色 + `?`）。
+- **自動較正**: 公式窓内の台帳クレジット合計 ÷ (`used_pct` / 100) を `weekly_cap_est`
+  としてキャッシュに入れる。`used_pct < 1` や窓内クレジット 0 のときは `null` + 注記。
+  表示に使う上限は「手動 `codex_weekly_credits` > 自動 `weekly_cap_est`」の優先（`cap_source`）。
+
+### プライバシー / 安全要件
+
+- 応答は**数値だけ**に削ぎ落として保存する（`plan_type` / `primary` / `secondary`）。
+  `email` / `user_id` / `account_id` / `access_token` は**サンプル・キャッシュ・標準出力・
+  標準エラー・例外メッセージのどこにも書かない**（テストが文字列走査で検証している）。
+- 例外は型名か自前メッセージだけを注記に載せる（例外オブジェクトの中身は展開しない）。
+- ネットワーク送信先は `https://chatgpt.com` のみ。
+
+### 401 になったら
+
+トークンは codex CLI が更新する（cost-manager からはリフレッシュしない）。
+`codex` を一度実行すると回復することがある。回復しなければ codex CLI で再ログインする。
+
+### [未検証]
+
+- `used_percent` の丸め粒度（整数丸めと推定。週内に約 46 クレジット消費済みでも 0 が返る実測あり。
+  そのため `weekly_cap_est` の誤差は大きい）。
+- 窓アンカー（`reset_at`）の安定性。
+- このエンドポイントは**非公開 API** であり、予告なく変わりうる。
 
 ## テスト
 

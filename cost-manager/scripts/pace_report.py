@@ -86,7 +86,17 @@ def build(now: float, args) -> dict:
             source = "cache.json"
 
     if resets_at is None:
-        return {"ok": False, "reason": "no_samples"}
+        # Claude 側のサンプルが無くても、Codex 公式 usage は公式窓だけで成立する。
+        # cache に codex があれば Codex 節（公式行を含む）だけを出して正常終了する。
+        return {
+            "ok": False,
+            "reason": "no_samples",
+            "now": now,
+            "codex": cache.get("codex") or None,
+            "cache_notes": list(cache.get("notes") or []),
+            "cache_computed_at": cache.get("computed_at"),
+            "cache_error": cache.get("error"),
+        }
 
     start = resets_at - WEEK_SEC
     closed = now >= resets_at
@@ -216,12 +226,111 @@ NOTES = [
 ]
 
 
+def jst(epoch):
+    return lib.to_jst(datetime.fromtimestamp(epoch, tz=timezone.utc)).strftime("%Y-%m-%d %H:%M")
+
+
+def safe_jst(epoch) -> str:
+    """範囲外・非数値の epoch でも落ちない JST 表示（表示不能なら「不明」）。
+
+    cache.json は古い版・手で壊された版がありうるので、表示側でも範囲外値を受け止める
+    （`datetime.fromtimestamp` は ValueError / OverflowError / OSError で落ちる）。
+    """
+    if not pace_refresh.valid_resets_at(epoch):
+        return "不明"
+    try:
+        return jst(epoch)
+    except (ValueError, OverflowError, OSError, TypeError):
+        return "不明"
+
+
+def _codex_lines(d: dict, cx: dict) -> list:
+    """Codex 節（公式行・較正・窓内・モデル別・注記）の行を組み立てる。
+
+    Claude 側のサンプルが無い場合（`ok: False`）でもこの節だけは出せるので、
+    `render_text()` から切り出してある。
+    """
+    L = ["", "Codex（codex-bridge の使用量台帳より・参考）"]
+    o = cx.get("official")
+    if o:
+        o_pace = f"{o['pace']:.2f}" if o.get("pace") is not None else "—"
+        o_proj = (f"{o['projected_end_pct']:.0f}%"
+                  if o.get("projected_end_pct") is not None else "—")
+        age = lib.fmt_duration(max(0.0, d["now"] - (o.get("sampled_at") or d["now"])))
+        L.append(
+            f"  公式   : used {o['used_pct']:.0f}% / 経過 {o['elapsed_ratio'] * 100:.0f}%"
+            f" · ペース {o_pace} · 週末見込み {o_proj}"
+            f"（plan: {o.get('plan_type') or '不明'}、リセット {safe_jst(o.get('reset_at'))} JST、"
+            f"サンプル {age}前{'・古い' if o.get('stale') else ''}）"
+        )
+        est = cx.get("weekly_cap_est")
+        if est:
+            L.append(
+                f"  較正   : weekly_cap_est ≈ {lib.fmt_credits(est)} cr"
+                "（誤差大: used_percent は整数丸め）"
+            )
+        else:
+            L.append("  較正   : weekly_cap_est は算出できていません（注記を参照）")
+        src = cx.get("cap_source")
+        if src == "manual":
+            L.append("  上限   : 手動設定（budget.pace.codex_weekly_credits）を使用しています")
+        elif src == "estimated":
+            L.append("  上限   : 自動較正（weekly_cap_est）を使用しています")
+            # 上限が公式 % から逆算した値なので、台帳側の % は必ず公式 % に一致する。
+            # 独立した裏取りではないことを明示する。
+            L.append("           （較正の定義上、公式%と一致します）")
+    # 表示に使う上限は「手動 codex_weekly_credits > 自動 weekly_cap_est」の優先。
+    cap = cx.get("weekly_cap") or cx.get("weekly_cap_est")
+    # 古いキャッシュや不正な上限値では cap があっても used_pct が None になりうる
+    if cap and cx.get("used_pct") is not None:
+        pace_c = f"{cx['pace']:.2f}" if cx.get("pace") is not None else "—"
+        proj_c = f"{cx['projected_end_pct']:.0f}%" if cx.get("projected_end_pct") is not None else "—"
+        L.append(
+            f"  窓内   : {lib.fmt_credits(cx['window_credits'])}cr / {cx['window_jobs']} 件"
+            f"（上限 {lib.fmt_credits(cap)}cr の {cx['used_pct']:.0f}%）"
+            f" · ペース {pace_c} · 週末到達見込み {proj_c}"
+        )
+    else:
+        L.append(
+            f"  窓内   : {lib.fmt_credits(cx['window_credits'])}cr / {cx['window_jobs']} 件"
+            "（上限未設定のため % は出せません）"
+        )
+    L.append(
+        f"  5時間窓: {lib.fmt_credits(cx['five_hour_credits'])}cr / "
+        f"{cx.get('five_hour_jobs', 0)} 件"
+    )
+    by_model = cx.get("by_model") or {}
+    for name, v in sorted(by_model.items(), key=lambda kv: -(kv[1].get("credits") or 0)):
+        L.append(
+            f"    {name:<20} {lib.fmt_credits(v.get('credits')):>10}cr  "
+            f"{v.get('jobs', 0):>3} 件  {lib.fmt_tokens(v.get('output_tokens')):>12} out-tok"
+        )
+    L.append(f"  無視した行: {cx.get('ignored_rows', 0)} 件 / 台帳: {cx.get('ledger_path')}")
+    for n in cx.get("notes") or []:
+        L.append(f"  注記: {n}")
+    return L
+
+
 def render_text(d: dict) -> str:
     if not d.get("ok"):
-        return "サンプルがまだありません（statusline を数分動かしてから再実行してください）。"
-
-    def jst(epoch):
-        return lib.to_jst(datetime.fromtimestamp(epoch, tz=timezone.utc)).strftime("%Y-%m-%d %H:%M")
+        cx = d.get("codex")
+        if not cx:
+            return "サンプルがまだありません（statusline を数分動かしてから再実行してください）。"
+        # Claude 側のサンプルが無くても Codex 公式 usage は公式窓だけで成立する。
+        L = [
+            "週次枠ペーシング（pace）",
+            "",
+            "Claude 側のサンプルがまだありません（statusline を数分動かしてから再実行して"
+            "ください）。Codex の集計だけを表示します。",
+        ]
+        L += _codex_lines(d, cx)
+        notes = list(d.get("cache_notes") or [])
+        if notes:
+            L.append("")
+            L.append("注記")
+            for n in notes:
+                L.append(f"  - {n}")
+        return "\n".join(L)
 
     L = []
     w = d["window"]
@@ -268,36 +377,7 @@ def render_text(d: dict) -> str:
 
     cx = d.get("codex")
     if cx:
-        L.append("")
-        L.append("Codex（codex-bridge の使用量台帳より・参考）")
-        cap = cx.get("weekly_cap")
-        # 古いキャッシュや不正な上限値では cap があっても used_pct が None になりうる
-        if cap and cx.get("used_pct") is not None:
-            pace_c = f"{cx['pace']:.2f}" if cx.get("pace") is not None else "—"
-            proj_c = f"{cx['projected_end_pct']:.0f}%" if cx.get("projected_end_pct") is not None else "—"
-            L.append(
-                f"  窓内   : {lib.fmt_credits(cx['window_credits'])}cr / {cx['window_jobs']} 件"
-                f"（上限 {lib.fmt_credits(cap)}cr の {cx['used_pct']:.0f}%）"
-                f" · ペース {pace_c} · 週末到達見込み {proj_c}"
-            )
-        else:
-            L.append(
-                f"  窓内   : {lib.fmt_credits(cx['window_credits'])}cr / {cx['window_jobs']} 件"
-                "（上限未設定のため % は出せません）"
-            )
-        L.append(
-            f"  5時間窓: {lib.fmt_credits(cx['five_hour_credits'])}cr / "
-            f"{cx.get('five_hour_jobs', 0)} 件"
-        )
-        by_model = cx.get("by_model") or {}
-        for name, v in sorted(by_model.items(), key=lambda kv: -(kv[1].get("credits") or 0)):
-            L.append(
-                f"    {name:<20} {lib.fmt_credits(v.get('credits')):>10}cr  "
-                f"{v.get('jobs', 0):>3} 件  {lib.fmt_tokens(v.get('output_tokens')):>12} out-tok"
-            )
-        L.append(f"  無視した行: {cx.get('ignored_rows', 0)} 件 / 台帳: {cx.get('ledger_path')}")
-        for n in cx.get("notes") or []:
-            L.append(f"  注記: {n}")
+        L += _codex_lines(d, cx)
 
     cal = d.get("calibration") or {}
     L.append("")
@@ -375,7 +455,8 @@ def main():
     else:
         print(render_text(d))
 
-    if not d.get("ok"):
+    # Claude 側のサンプルが無くても、Codex 節（公式行）を出せたなら正常終了する。
+    if not d.get("ok") and not d.get("codex"):
         sys.exit(3)
 
 
