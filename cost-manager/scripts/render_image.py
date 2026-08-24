@@ -452,8 +452,8 @@ def render_pillow(report: "lib.Report", meta: dict, out_path, config: dict) -> N
 # ---------------------------------------------------------------------------
 # 凍結: これは pillow 版の失敗時フォールバック専用の簡易版。task_desc 表示・
 # Fable/その他小計・Retina(2x) 対応等の新機能は pillow 版のみに実装している。
-# 正となるレイアウトは常に render_pillow() 側。二重メンテを避けるため本関数と
-# card.html.tmpl はこれ以上拡張しない方針とする。
+# 正となるレイアウトは常に render_pillow() 側。
+# card.html.tmpl には実処理時間行・ラベル改名・タイトル3行クランプ（CSSのみ）を反映済みで、それ以外は拡張しない。
 
 def _build_card_html(report: "lib.Report", meta: dict, width: int) -> str:
     tmpl_path = lib.code_root() / "templates" / "card.html.tmpl"
@@ -467,6 +467,7 @@ def _build_card_html(report: "lib.Report", meta: dict, width: int) -> str:
         cells = _model_row_cells(m)  # (name, in_c, write_c, read_c, out_c, cost_c)
         tds = "".join(f"<td>{html.escape(str(c))}</td>" for c in cells)
         rows_html.append(f"        <tr>{tds}</tr>")
+    title_text = str(meta.get("task_name") or "(無題タスク)")
     height = _card_height(max(len(report.models), 1), width)
     stale_note = "（単価が古い可能性あり）" if report.stale else ""
 
@@ -477,11 +478,12 @@ def _build_card_html(report: "lib.Report", meta: dict, width: int) -> str:
         # card_width / card_height は CSS の px 数値なのでエスケープしない（数値のみ）
         "card_width": width,
         "card_height": height,
-        "task_name": esc(meta.get("task_name") or "(無題タスク)"),
+        "task_name": esc(title_text),
         "date_jst": esc(meta.get("date_jst", "")),
         "start_jst": esc(meta.get("start_jst", "")),
         "end_jst": esc(meta.get("end_jst", "")),
         "duration": esc(meta.get("duration", "")),
+        "active_text": esc(meta.get("active_text", "—")),
         "model_rows_html": "\n".join(rows_html),
         "total_usd": esc(lib.fmt_usd(report.total_usd, 2)),
         "total_jpy": esc(lib.fmt_jpy(report.total_jpy)),
