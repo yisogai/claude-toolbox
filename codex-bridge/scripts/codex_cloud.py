@@ -17,7 +17,9 @@ best-of-N（`--attempts N`）の実装委譲をクラウド側に投げ、生成
 
 実行例:
   # best-of-3 で投げる（ENV_ID は `codex cloud` の TUI で確認する）
-  python3 codex_cloud.py submit --env env_abc123 --attempts 3 --prompt-file prompt.md
+  # ENV_ID は Codex Web の環境設定 URL 末尾の 32 桁 hex（例: 6a8c4ba225d08191a0b1f440d06bcbdc）。
+  # --env 省略時は $CODEX_BRIDGE_CLOUD_ENV → var/cloud.json の env_id の順で既定値を使う。
+  python3 codex_cloud.py submit --attempts 3 --prompt-file prompt.md
   python3 codex_cloud.py list --json
   python3 codex_cloud.py status task_xyz
   python3 codex_cloud.py diff task_xyz --attempt 2
@@ -31,6 +33,7 @@ best-of-N（`--attempts N`）の実装委譲をクラウド側に投げ、生成
 from __future__ import annotations
 
 import argparse
+import json
 import os
 import shlex
 import signal
@@ -79,7 +82,8 @@ def build_parser() -> argparse.ArgumentParser:
 
     # -- submit ----------------------------------------------------------
     s = sub.add_parser("submit", help="クラウドにタスクを投げる（codex cloud exec）")
-    s.add_argument("--env", required=True, help="対象の環境 ID（ENV_ID）")
+    s.add_argument("--env", default=None,
+               help="対象の環境 ID（省略時: $CODEX_BRIDGE_CLOUD_ENV → var/cloud.json の env_id）")
     s.add_argument("--attempts", type=int, default=1, help="best-of-N の N（既定 1）")
     s.add_argument("--branch", default=None, help="実行対象の git ブランチ（既定: 現在のブランチ）")
     s.add_argument("--prompt", default=None, help="プロンプト文字列")
@@ -126,6 +130,27 @@ def decode_prompt(raw: bytes, source: str) -> str:
     if "�" in text:
         lib.eprint(f"警告: プロンプト（{source}）に不正な UTF-8 があったため置換して読み込んだ")
     return text
+
+
+def resolve_env_id(args) -> str | None:
+    """submit の --env 省略時の既定値を解決する。
+
+    優先順: 明示の --env → 環境変数 CODEX_BRIDGE_CLOUD_ENV → var/cloud.json の "env_id"。
+    var/cloud.json は gitignore 済みのマシンローカル設定（アカウント紐付きの ID を
+    リポジトリに残さないため）。
+    """
+    if args.env:
+        return args.env
+    from_env = os.environ.get("CODEX_BRIDGE_CLOUD_ENV")
+    if from_env:
+        return from_env
+    cfg = lib.var_dir() / "cloud.json"
+    try:
+        data = json.loads(cfg.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    value = data.get("env_id") if isinstance(data, dict) else None
+    return value if isinstance(value, str) and value else None
 
 
 def load_prompt(args) -> tuple[str | None, int]:
@@ -319,6 +344,10 @@ def main(argv_in=None) -> int:
 
     prompt = None
     if args.cmd == "submit":
+        args.env = resolve_env_id(args)
+        if not args.env:
+            lib.eprint("エラー: 環境 ID がありません（--env / $CODEX_BRIDGE_CLOUD_ENV / var/cloud.json の env_id）")
+            return 1
         prompt, code = load_prompt(args)
         if code:
             return code

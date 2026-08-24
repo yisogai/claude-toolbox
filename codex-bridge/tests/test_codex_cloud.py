@@ -117,3 +117,33 @@ class TestCloudArgvMirrors(CloudBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CloudEnvResolution(CloudBase):
+    """submit の --env 省略時の既定値解決（--env → $CODEX_BRIDGE_CLOUD_ENV → var/cloud.json）。
+
+    実機 codex は呼ばない。環境変数で解決が成功したことは「env 検証を通過して
+    バイナリ解決（exit 4）まで進む」ことで示す。
+    """
+
+    def run_cloud(self, argv, env):
+        return subprocess.run([sys.executable, str(CLOUD)] + argv,
+                              capture_output=True, text=True, env=env, timeout=60)
+
+    def test_submit_without_any_env_source(self):
+        env = self.env()
+        env.pop("CODEX_BRIDGE_CLOUD_ENV", None)
+        r = self.run_cloud(["submit", "--prompt", "x", "--codex-bin", str(self.fake_bin)], env)
+        # 開発機に var/cloud.json があれば解決に成功して exit 4（バイナリ解決）まで進み、
+        # 無ければ解決失敗の exit 1。どちらでも「submit が実行に至らない」ことは変わらない。
+        self.assertIn(r.returncode, (1, 4), r.stderr)
+        if r.returncode == 1:
+            self.assertIn("環境 ID がありません", r.stderr)
+
+    def test_submit_env_from_environment_variable_reaches_bin_resolution(self):
+        env = self.env()
+        env["CODEX_BRIDGE_CLOUD_ENV"] = "6a8c4ba225d08191deadbeef00000000"
+        r = self.run_cloud(["submit", "--prompt", "x", "--codex-bin", str(self.fake_bin)], env)
+        # env 解決を通過し、次段のバイナリ解決で exit 4 になる（exit 1 なら解決失敗）
+        self.assertEqual(r.returncode, 4, r.stderr)
+        self.assertNotIn("環境 ID がありません", r.stderr)

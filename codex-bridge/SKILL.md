@@ -82,13 +82,30 @@ python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/script
 **Web 調査の委譲**（広く浅い一次情報収集。Claude の WebSearch 枠温存）:
 `codex_run.py --mode task --web-search --prompt "…調査して出典 URL 付きで返す"`（read-only のまま）。
 
-**クラウド並列実装（best-of-N）**（前提: ChatGPT 側で GitHub 連携とクラウド環境 ENV_ID の作成が必要）:
+**クラウド並列実装（best-of-N）**:
 ```bash
-python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py submit --env <ENV_ID> --attempts 3 --prompt-file /tmp/p.md
+python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py submit --attempts 3 --prompt-file /tmp/p.md
 python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py list --json / status <task> / diff <task> --attempt N
 python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_cloud.py apply <task> --attempt N --yes   # --yes なしはドライラン
 ```
+- `--env` は省略可（既定値の解決順: `--env` → `$CODEX_BRIDGE_CLOUD_ENV` → `var/cloud.json` の
+  `env_id`）。環境 ID は Codex Web の環境設定 URL 末尾の 32 桁 hex。未設定リポジトリで使うときは
+  ChatGPT 側（chatgpt.com/codex → Settings → Environments）で GitHub 連携と環境作成が先。
+- cloud はリポジトリの **push 済みの状態**に対して走る（ローカルの未コミット変更は見えない）。
+- `status` はタスクが pending の間、子 codex が非ゼロを返すことがある（→ラッパーは exit 2）。
+  完了判定は exit code でなく出力の `[READY]` か `list --json` の `status` で行う。初回タスクは
+  コンテナ構築が入るため数分かかる。
 - 各案の diff は必ず Claude がレビューして裁定してから apply する。
+
+## 委譲の並列化 — 3方式の使い分け
+
+| 方式 | 使いどころ | 制約 |
+|---|---|---|
+| ローカル直列（既定） | ローカルの未コミット変更が要る／段階制御・スキーマ合流が要る | **並列度1厳守**（多重起動は認証 token_invalidated の既知リスク #26303。--max-parallel を上げない） |
+| **spawn**（Codex 内蔵 multi_agent） | 1つの委譲タスクの**内部**に独立サブ作業が複数（複数ファイルの独立調査・多観点レビュー・並列テスト） | プロンプトで「collaboration ツール（spawn_agent）で N 体並列に」と明示。1 exec = 1 認証なので token 競合なし（並列動作は実測確認済み 2026-08-24）。成果は親の最終メッセージ経由のみ・目安 2〜4体 |
+| **cloud**（codex_cloud.py） | 同一仕様の複数案（--attempts N）／互いに独立な複数タスクの同時実行／長時間タスクの切り離し | push 済み GitHub リポジトリ＋環境作成済みが前提。diff レビュー後に apply |
+
+- どの方式にするかの裁定はメイン（Claude）が行う。迷ったらローカル直列。
 
 ## 原則
 - **成否を終了コードで判断しない**。Codex はテストが失敗していても turn が正常完了すれば exit 0 を返す。
