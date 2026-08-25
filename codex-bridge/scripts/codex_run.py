@@ -680,9 +680,13 @@ EXIT_BY_STATUS = {
 }
 
 #: 認証エラーの兆候。部分一致（"login" / "401"）だと `logout` / `4010` / パス名で誤爆するため、
-#: 語境界つきのパターンに絞る。
+#: 語境界つきのパターンに絞る。refresh_token 系はサーバが返す認証死のコード
+#: （reused / expired / invalidated。ローテーション型 refresh token の再利用検出。
+#: 2026-08-25 調査）で、`\btoken[_ ]invalidated\b` は `_` が語文字のため
+#: `refresh_token_invalidated` にマッチしない。別 alternation として明示する。
 AUTH_PATTERN = re.compile(
     r"\b(unauthorized|not logged in|401\s+unauthorized|invalid[_ -]api[_ -]key|token[_ ]invalidated)\b"
+    r"|\brefresh[_ ]token[_ ](reused|expired|invalidated)\b"
     r"|please run .?codex login"
     r"|\bcodex login\b",
     re.IGNORECASE,

@@ -195,3 +195,54 @@ class TestPool(PoolBase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class AuthErrorDetection(unittest.TestCase):
+    """contains_auth_error の回帰。実プロトコル形（v2 スキーマ実確認済み）で固定する。
+
+    - 誤爆側: コンテンツ系（userMessage echo・agentMessage・commandExecution 出力）は
+      「401」「codex login」を含んでも検出しない（2026-08-25 の二度の実誤爆の再発防止）。
+    - 検出側: ErrorNotification は params.error（TurnError{message}）、turn/completed は
+      params.turn.error に認証死コードが現れる。refresh_token_reused / expired /
+      invalidated（サーバのローテーション検出コード）も AUTH_PATTERN で拾う。
+    """
+
+    def setUp(self):
+        import codex_pool
+        self.f = codex_pool.contains_auth_error
+
+    def test_prompt_echo_with_401_is_not_auth_error(self):
+        ev = {"method": "item/started", "params": {"item": {
+            "type": "userMessage",
+            "text": "レビュー本文: HTTP 401 Unauthorized の扱いと codex login の案内文を確認して"}}}
+        self.assertFalse(self.f(ev))
+
+    def test_command_output_with_auth_words_is_not_auth_error(self):
+        # 二度目の実誤爆: 対象コードの grep 結果に 401 / unauthorized が普通に含まれる
+        ev = {"method": "item/completed", "params": {"item": {
+            "type": "commandExecution",
+            "command": "grep -rn 'unauthorized' src/",
+            "aggregatedOutput": "src/auth.py:12: raise Unauthorized('401 token_invalidated')"}}}
+        self.assertFalse(self.f(ev))
+
+    def test_error_notification_token_invalidated_detected(self):
+        ev = {"method": "error", "params": {"threadId": "t", "turnId": "u", "willRetry": False,
+                                            "error": {"message": "stream error: 401 token_invalidated"}}}
+        self.assertTrue(self.f(ev))
+
+    def test_turn_error_refresh_token_variants_detected(self):
+        for code in ("refresh_token_reused", "refresh_token_expired", "refresh_token_invalidated"):
+            ev = {"method": "turn/completed", "params": {"threadId": "t", "turn": {
+                "id": "u", "items": [], "status": "failed",
+                "error": {"message": f"auth failed: {code}"}}}}
+            self.assertTrue(self.f(ev), code)
+
+    def test_error_item_detected(self):
+        ev = {"method": "item/completed", "params": {"item": {
+            "type": "error", "message": "please run `codex login`"}}}
+        self.assertTrue(self.f(ev))
+
+    def test_plain_numbers_and_paths_not_detected(self):
+        for s in ("処理に 4010ms かかった", "/tmp/log-401/x.txt", "logout しました"):
+            ev = {"method": "error", "params": {"error": {"message": s}}}
+            self.assertFalse(self.f(ev), s)
