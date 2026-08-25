@@ -23,14 +23,13 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import codex_lib as lib  # noqa: E402
-from codex_run import Slot, acquire_slot, try_acquire_slot  # noqa: E402,F401
+from codex_run import AUTH_PATTERN, Slot, acquire_slot, try_acquire_slot  # noqa: E402,F401
 
 
 MAX_PARALLEL = 4
 REQUEST_TIMEOUT = 30.0
 POLL_SEC = 0.05
 GRACE_SEC = 3.0
-AUTH_MARKERS = ("401", "token_invalidated", "refresh_token", "unauthorized", "not logged in")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -118,10 +117,18 @@ def kill_group(proc: subprocess.Popen) -> None:
 
 def contains_auth_error(value) -> bool:
     if isinstance(value, dict):
+        # userMessage / agentMessage の item はプロンプト echo・モデル応答本文であり、
+        # 「401」「codex login」等を引用しているだけで認証エラーと誤検出する
+        # （2026-08-25 に実誤爆: レビュー本文入りプロンプトでプール全体が即停止）。
+        # 本物の認証エラーは error 系フィールド・status にしか現れないので除外してよい。
+        if value.get("type") in ("userMessage", "agentMessage"):
+            return False
         return any(contains_auth_error(v) for v in value.values())
     if isinstance(value, list):
         return any(contains_auth_error(v) for v in value)
-    return isinstance(value, str) and any(m in value.lower() for m in AUTH_MARKERS)
+    # 素朴な部分一致（"401" 等）はプロンプト・パス名で誤爆するため、
+    # codex_run.AUTH_PATTERN（語境界つき）に統一する。
+    return isinstance(value, str) and AUTH_PATTERN.search(value) is not None
 
 
 class RpcClient:
