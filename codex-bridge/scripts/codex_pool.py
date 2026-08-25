@@ -115,20 +115,43 @@ def kill_group(proc: subprocess.Popen) -> None:
             pass
 
 
-def contains_auth_error(value) -> bool:
+def _iter_error_values(msg: dict):
+    """通知メッセージから「エラーを表すフィールド」だけを取り出す。
+
+    コンテンツ系 item（userMessage の echo・agentMessage 本文・commandExecution の
+    コマンド/出力・reasoning 等）は照合しない。対象リポのコードやプロンプトが
+    401 / unauthorized / codex login を普通に含むため、内容照合は必ず誤爆する
+    （2026-08-25 に二度実誤爆: プロンプト echo → 修正後に commandExecution 出力）。
+    本物の認証エラーは error 系フィールドにしか現れない。
+    """
+    params = msg.get("params") or {}
+    for v in (msg.get("error"), params.get("error")):
+        if v:
+            yield v
+    item = params.get("item") or {}
+    if isinstance(item, dict) and item.get("type") == "error":
+        yield item
+    turn = params.get("turn") or {}
+    if isinstance(turn, dict) and turn.get("error"):
+        yield turn["error"]
+    status = params.get("status")
+    if isinstance(status, dict) and status.get("error"):
+        yield status["error"]
+
+
+def _auth_text(value) -> bool:
     if isinstance(value, dict):
-        # userMessage / agentMessage の item はプロンプト echo・モデル応答本文であり、
-        # 「401」「codex login」等を引用しているだけで認証エラーと誤検出する
-        # （2026-08-25 に実誤爆: レビュー本文入りプロンプトでプール全体が即停止）。
-        # 本物の認証エラーは error 系フィールド・status にしか現れないので除外してよい。
-        if value.get("type") in ("userMessage", "agentMessage"):
-            return False
-        return any(contains_auth_error(v) for v in value.values())
+        return any(_auth_text(v) for v in value.values())
     if isinstance(value, list):
-        return any(contains_auth_error(v) for v in value)
-    # 素朴な部分一致（"401" 等）はプロンプト・パス名で誤爆するため、
-    # codex_run.AUTH_PATTERN（語境界つき）に統一する。
+        return any(_auth_text(v) for v in value)
+    # 素朴な部分一致（"401" 等）はパス名等で誤爆するため codex_run.AUTH_PATTERN に統一。
     return isinstance(value, str) and AUTH_PATTERN.search(value) is not None
+
+
+def contains_auth_error(msg) -> bool:
+    if not isinstance(msg, dict):
+        return False
+    return any(_auth_text(v) for v in _iter_error_values(msg))
 
 
 class RpcClient:
