@@ -45,6 +45,15 @@ def log_received(method: str, params: dict) -> None:
         fh.write(json.dumps(record, ensure_ascii=False) + "\n")
 
 
+def log_argv() -> None:
+    """起動引数をテスト側に渡す（pool の config 配管検証専用）。"""
+    path = os.environ.get("MOCK_APP_SERVER_ARGV_LOG")
+    if not path:
+        return
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(sys.argv, fh, ensure_ascii=False)
+
+
 def reply(ident, result=None, error=None) -> None:
     obj = {"jsonrpc": "2.0", "id": ident}
     if error is not None:
@@ -87,6 +96,7 @@ def run_turn(thread_id: str, prompt: str, opts: dict) -> None:
 
 def main() -> int:
     global TURN_COUNT
+    log_argv()
     for raw in sys.stdin:
         try:
             msg = json.loads(raw)

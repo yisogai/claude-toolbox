@@ -170,6 +170,21 @@ class TestPool(PoolBase):
                   if json.loads(line)["method"] == "turn/start"]
         self.assertEqual(starts[0]["params"]["outputSchema"], {"type": "object"})
 
+    def test_codex_config_and_web_search_are_passed_to_mock_server(self):
+        argv_log = self.tmp / "app-server-argv.json"
+        proc, _ = self.run_pool(
+            self.jobs("configured"),
+            extra=("--codex-config", "feature_flag=true", "--codex-config", 'name="value"',
+                   "--web-search"),
+            env=self.env(MOCK_APP_SERVER_ARGV_LOG=argv_log),
+        )
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        received_argv = json.loads(argv_log.read_text(encoding="utf-8"))
+        self.assertEqual(
+            received_argv[1:],
+            ["-c", "feature_flag=true", "-c", 'name="value"', "-c", 'web_search="live"'],
+        )
+
     def test_sigterm_writes_every_job_before_stopping_server_group(self):
         output = self.tmp / "pool"
         argv = [sys.executable, str(POOL), "run", "--jobs-file", str(self.jobs_file(self.jobs("a", "b"))),

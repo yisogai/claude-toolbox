@@ -2,7 +2,8 @@
 """短命の codex app-server に複数のジョブを投入するワーカープール。
 
 一つのバッチだけを処理する子プロセスとして app-server を起動し、JSON-RPC の thread/start /
-turn/start を最大 ``--max-parallel`` 件まで並行させる。app-server が死んだ場合、タイムアウト、
+turn/start を最大 ``--max-parallel`` 件まで並行させる。``--codex-config`` と
+``--web-search`` は app-server の ``-c`` 設定として渡す。app-server が死んだ場合、タイムアウト、
 シグナル、認証異常のいずれでも running の job.json を残さないことを最優先にする。
 """
 
@@ -44,6 +45,10 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--idle-timeout-sec", type=float, default=600.0, help="全通知が止まる許容秒")
     run.add_argument("--model", default="gpt-5.6-terra", help="既定モデル")
     run.add_argument("--effort", default="high", help="既定 reasoning effort")
+    run.add_argument("--codex-config", action="append", default=[], metavar="KEY=VALUE",
+                     help="app-server に渡す Codex 設定（-c KEY=VALUE、繰り返し指定可）")
+    run.add_argument("--web-search", action="store_true",
+                     help='Web 検索を live モードで許可（-c web_search="live" を追加）')
     run.add_argument("--codex-bin", default=None, help="codex 実バイナリ")
     run.add_argument("--mock-server", default=None, help="app-server を模す Python スクリプト（テスト専用）")
     return parser
@@ -428,6 +433,11 @@ class Pool:
                     self.finalise_unfinished("failed", "codex バイナリが見つからない")
                     return 4
                 argv = [binary, "app-server"]
+            for config in self.args.codex_config:
+                argv += ["-c", config]
+            if self.args.web_search:
+                # 値の引用符も引数に含め、TOML の文字列として解釈させる。
+                argv += ["-c", 'web_search="live"']
             try:
                 self.rpc = RpcClient(argv, str(self.pool_dir), self.on_notification)
                 self.rpc.call("initialize", {"clientInfo": {"name": "codex-pool", "title": "Codex Pool", "version": "1.0"}})

@@ -421,6 +421,27 @@ class TestRenderPrompt(Base):
         self.assertIn("1 行追加", text)
         self.assertNotIn("{{", text)
 
+    def test_research_explore_and_verify_templates_resolve_and_require_values(self):
+        cases = (
+            ("research", ("QUESTION=問い", "FOCUS=重点"), "QUESTION"),
+            ("explore", ("TARGET=対象", "QUESTIONS=確認事項"), "TARGET"),
+            ("verify", ("CLAIM=主張", "CONTEXT=背景"), "CLAIM"),
+        )
+        for template, values, missing in cases:
+            with self.subTest(template=template):
+                full = self.render([template] + [item for value in values for item in ("--set", value)])
+                self.assertEqual(full.returncode, 0, full.stderr)
+                self.assertNotIn("{{", full.stdout)
+                incomplete = self.render([template, "--set", values[1]])
+                self.assertEqual(incomplete.returncode, 1)
+                self.assertIn(missing, incomplete.stderr)
+
+    def test_new_prompt_schemas_are_strict_json(self):
+        for name in ("research", "explore", "verify"):
+            with self.subTest(name=name):
+                schema = json.loads((REPO / "templates" / "prompts" / f"{name}.schema.json").read_text(encoding="utf-8"))
+                self.assertFalse(schema["additionalProperties"])
+
 
 class TestJobCli(Base):
     def job_cli(self, argv):

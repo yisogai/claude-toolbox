@@ -18,7 +18,11 @@ description: Claude Code から OpenAI Codex CLI（codex exec）を非対話・�
      --set ACCEPTANCE="…" --set FORBIDDEN="…" --set-file CONTEXT=/tmp/context.md \
      --out /tmp/codex-prompt.md
    ```
-   - レビューなら `review --set-file DIFF=/tmp/x.diff --set FOCUS="…" --set CONTEXT="…"`。
+   - レビューなら `review --set-file DIFF=/tmp/x.diff --set FOCUS="…" --set-file CONTEXT=/tmp/ctx.txt`。
+   - **中身を制御できない値（diff・レビュー指摘・モデル生成テキスト・ユーザー入力）は必ず `--set-file`**。
+     `--set` のインライン引数は自分が書いた短い定型文だけに使う（引用符・バッククォート・`$(...)` が
+     シェル解釈され、exit 0 のまま内容が静かに書き換わる。2026-08-25 の deep-review レビューで実証）。
+     ファイルは Write ツールで書く（echo / printf / heredoc は引用符衝突で壊れる）。
    - 対象リポジトリのルートに `templates/AGENTS.md.tmpl` を `AGENTS.md` として置いてあることが前提
      （置いていなければ先にコピーし、リポジトリ固有の規約を末尾に追記する）。
 
@@ -79,8 +83,22 @@ python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/script
 ```
 - 反復は上限 3 回。1 周に渡す画像は 2 枚まで（過去周回の画像は捨てテキスト履歴のみ残す）。
 
-**Web 調査の委譲**（広く浅い一次情報収集。Claude の WebSearch 枠温存）:
-`codex_run.py --mode task --web-search --prompt "…調査して出典 URL 付きで返す"`（read-only のまま）。
+**Web 調査の委譲**（広く浅い一次情報収集。opus リサーチ艦隊の代替）:
+- 単発: `codex_run.py --mode task --web-search --prompt "…出典 URL 付きで"`（read-only のまま）。
+- **複数観点の並列調査は pool**: 観点ごとに `render_prompt.py research --set QUESTION="…" --set FOCUS="…"`
+  でプロンプトを作り、jobs.json の各ジョブに `output_schema_file` として
+  `templates/prompts/research.schema.json` を渡し、`codex_pool.py run --web-search …` で実行。
+  **統合・裁定だけ**を opus/メインで行う（調査本体に opus fan-out を使わない。2026-08-25 方針）。
+
+**探索・大量読みの委譲**（リポジトリ理解・多数ファイル要約。メイン文脈の肥大防止を兼ねる）:
+`render_prompt.py explore --set TARGET="読む対象" --set QUESTIONS="答えるべき問い"` でプロンプトを作り、
+read-only ジョブ（単発 exec か pool）＋ `explore.schema.json`。モデルは
+`gpt-5.6-luna` / effort medium で足りることが多い。メインは structured_output の evidence パスだけ読む。
+
+**反証検証の委譲**（レビュー指摘・調査クレームの検証）:
+`render_prompt.py verify --set CLAIM="…" --set CONTEXT="…"` ＋ `verify.schema.json`（verdict:
+confirmed / refuted / plausible）。指摘1件=1ジョブで pool に流す。`/deep-review` はこの配管を使う
+pool 駆動版（検証段の opus xhigh を置換済み。統合の opus high のみ Claude 側に残る）。
 
 **クラウド並列実装（best-of-N）**:
 ```bash
@@ -127,6 +145,7 @@ python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/script
 - 終了コード: 0=全完了 / 2=失敗あり / 3=timeout あり / 4=起動・ハンドシェイク失敗 / 1=引数。
 - pool は codex exec と同じ flock スロットを1つ掴む（実行中は exec 系ジョブが待ちになる。逆も然り）。
 - 401 / token_invalidated 検出時はプール全体を即中断する（リトライしない）。再ログインをユーザーに報告。
+- `--codex-config` と `--web-search` が同じキーを指定した場合は後者（後置の `-c`）が勝つ（last-wins、実測確認済み）。
 - 各スレッドで MCP サーバが起動するため立ち上がりに数秒〜十数秒の揺らぎがある。ジョブの
   タイムアウトには余裕を持たせる。
 
