@@ -104,15 +104,31 @@ python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/script
   コンテナ構築が入るため数分かかる。
 - 各案の diff は必ず Claude がレビューして裁定してから apply する。
 
-## 委譲の並列化 — 3方式の使い分け
+## 委譲の並列化 — 4方式の使い分け
 
 | 方式 | 使いどころ | 制約 |
 |---|---|---|
-| ローカル直列（既定） | ローカルの未コミット変更が要る／段階制御・スキーマ合流が要る | **並列度1厳守**（多重起動は認証 token_invalidated の既知リスク #26303。--max-parallel を上げない） |
-| **spawn**（Codex 内蔵 multi_agent） | 1つの委譲タスクの**内部**に独立サブ作業が複数（複数ファイルの独立調査・多観点レビュー・並列テスト） | プロンプトで「collaboration ツール（spawn_agent）で N 体並列に」と明示。1 exec = 1 認証なので token 競合なし（並列動作は実測確認済み 2026-08-24）。成果は親の最終メッセージ経由のみ・目安 2〜4体 |
-| **cloud**（codex_cloud.py） | 同一仕様の複数案（--attempts N）／互いに独立な複数タスクの同時実行／長時間タスクの切り離し | push 済み GitHub リポジトリ＋環境作成済みが前提。diff レビュー後に apply |
+| ローカル直列（既定） | ローカルの未コミット変更が要る／段階制御・スキーマ合流が要る | **codex exec の多重起動は禁止**（認証 token_invalidated の既知リスク #26303。--max-parallel を上げない） |
+| **pool**（codex_pool.py） | 独立した複数ジョブを**ローカルで並列**に（Workflow からの並列委譲・複数リポの同時作業） | app-server 1プロセス多重化なので認証競合なし（実測済み 2026-08-25）。並列度既定 3・上限 4。**usage が台帳に載らない**（プロトコル上未取得）。画像入力は未対応 |
+| **spawn**（Codex 内蔵 multi_agent） | 1つの委譲タスクの**内部**に独立サブ作業が複数（多観点レビュー・並列調査） | プロンプトで「collaboration ツール（spawn_agent）で N 体並列に」と明示。成果は親の最終メッセージ経由のみ・目安 2〜4体 |
+| **cloud**（codex_cloud.py） | 同一仕様の複数案（--attempts N）／長時間タスクの切り離し／ローカルを占有したくないとき | push 済み GitHub リポジトリ＋環境作成済みが前提。diff レビュー後に apply |
 
 - どの方式にするかの裁定はメイン（Claude）が行う。迷ったらローカル直列。
+
+**pool の使い方**（短命プロセス。常駐させない）:
+```bash
+# jobs.json: {"jobs":[{"id":"a","cwd":"/絶対パス","prompt":"…","write":false,
+#             "model":任意,"effort":任意,"output_schema_file":任意}, …]}（1〜8件）
+python3 /Users/<YOU>/Documents/personal/tools/claude-toolbox/codex-bridge/scripts/codex_pool.py run \
+  --jobs-file jobs.json --pool-dir <pool-dir> --max-parallel 3 \
+  --timeout-sec 1800 --job-timeout-sec 900
+# 結果: <pool-dir>/pool.json と <pool-dir>/jobs/<id>/{job.json,last.md,events.jsonl}
+```
+- 終了コード: 0=全完了 / 2=失敗あり / 3=timeout あり / 4=起動・ハンドシェイク失敗 / 1=引数。
+- pool は codex exec と同じ flock スロットを1つ掴む（実行中は exec 系ジョブが待ちになる。逆も然り）。
+- 401 / token_invalidated 検出時はプール全体を即中断する（リトライしない）。再ログインをユーザーに報告。
+- 各スレッドで MCP サーバが起動するため立ち上がりに数秒〜十数秒の揺らぎがある。ジョブの
+  タイムアウトには余裕を持たせる。
 
 ## 原則
 - **成否を終了コードで判断しない**。Codex はテストが失敗していても turn が正常完了すれば exit 0 を返す。

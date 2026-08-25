@@ -109,6 +109,12 @@ job-dir を使い回しても前回の結果が今回のものとして残るこ
 - **codex_cloud.py**: `codex cloud`（EXPERIMENTAL）の薄いラッパー。`submit --env <ENV_ID>
   --attempts N`（best-of-N）→ `list --json` / `status` / `diff --attempt N` → `apply --yes`。
   `--yes` なしの apply はドライラン。前提: ChatGPT 側で GitHub 連携とクラウド環境の作成。
+- **codex_pool.py**（2026-08-25 追加）: `codex app-server` 1プロセスに複数ジョブを thread として
+  並行投入するローカル並列プール。1プロセス = AuthManager 1個なので ChatGPT 認証の
+  プロセス間競合が構造的に起きない（設計根拠と実測は docs/research/2026-08-25-codex-local-parallel.md）。
+  短命プロセス（常駐 broker にしない。codex-plugin-cc #540 の轍の回避）。どの異常経路でも
+  running の job.json を残さない。codex exec と同じ flock スロットで相互排他。
+  制約: usage がプロトコル上取れず台帳未計上／画像入力未対応／並列度上限 4。
 
 ---
 
