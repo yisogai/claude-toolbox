@@ -592,6 +592,33 @@ class TestJobCli(Base):
         self.assertEqual(as_text.returncode, 0, as_text.stderr)
         self.assertIn("（うち部分計上 1 件）", as_text.stdout)
 
+    def test_usage_excludes_and_reports_invalid_rows(self):
+        self.write_ledger([self.ledger_row("gpt-5.6-terra", 1.37),
+                           {"usage": "invalid"}, {"usage": [1, 2, 3]}])
+        ledger = self.root / "var" / "codex_usage.jsonl"
+        with open(ledger, "a", encoding="utf-8") as f:
+            f.write('{"usage": broken json\n')
+
+        as_json = self.job_cli(["usage", "--json"])
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        data = json.loads(as_json.stdout)
+        self.assertEqual(data["jobs"], 1)
+        self.assertEqual(data["invalid_rows"], 3)
+        self.assertAlmostEqual(data["credits_total"], 1.37, places=4)
+
+        as_text = self.job_cli(["usage"])
+        self.assertEqual(as_text.returncode, 0, as_text.stderr)
+        self.assertIn("不正行の除外: 3 件", as_text.stdout)
+
+    def test_usage_omits_invalid_row_line_when_none(self):
+        self.write_ledger([self.ledger_row("gpt-5.6-terra", 1.37)])
+        as_json = self.job_cli(["usage", "--json"])
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        self.assertEqual(json.loads(as_json.stdout)["invalid_rows"], 0)
+        as_text = self.job_cli(["usage"])
+        self.assertEqual(as_text.returncode, 0, as_text.stderr)
+        self.assertNotIn("不正行の除外", as_text.stdout)
+
 
 class TestArgvAndLib(Base):
     def test_t01_normalize_usage_accepts_camel_case(self):

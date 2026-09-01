@@ -130,14 +130,22 @@ if ! cp -R "$SRC" "$DEST"; then
 fi
 echo "コピーしました: $SRC -> $DEST"
 
-# --- 実験物（スキル直下の experiments/）は配備対象外 ----------------------------
-if [ -d "$DEST/experiments" ]; then
-  if ! rm -rf "$DEST/experiments"; then
-    echo "エラー: experiments/ の除去に失敗しました: $DEST/experiments" >&2
-    exit 1
-  fi
-  echo "配備対象外のため除去しました: $DEST/experiments"
-fi
+# --- 配備対象外のディレクトリを除去 ---------------------------------------------
+EXCLUDE_DIRS=(experiments __pycache__ .pytest_cache)
+for exclude_dir in "${EXCLUDE_DIRS[@]}"; do
+  exclude_targets=()
+  while IFS= read -r -d '' target; do
+    exclude_targets+=("$target")
+  done < <(find "$DEST" -depth -type d -name "$exclude_dir" -print0)
+  for target in "${exclude_targets[@]}"; do
+    [ -d "$target" ] || continue
+    if ! rm -rf "$target"; then
+      echo "エラー: $exclude_dir/ の除去に失敗しました: $target" >&2
+      exit 1
+    fi
+    echo "配備対象外のため除去しました: $target"
+  done
+done
 
 # --- scripts/*.sh に実行権限を付与 ----------------------------------------------
 if [ -d "$DEST/scripts" ]; then

@@ -291,6 +291,7 @@ def cmd_usage(args) -> int:
         return 1
 
     rows = []
+    invalid_rows = 0
     if path.exists():
         try:
             with open(path, "r", encoding="utf-8", errors="replace") as f:
@@ -301,11 +302,18 @@ def cmd_usage(args) -> int:
                     try:
                         r = json.loads(line)
                     except json.JSONDecodeError:
+                        invalid_rows += 1
                         continue
                     if not isinstance(r, dict):
+                        invalid_rows += 1
                         continue
                     if r.get("mock"):
                         continue    # M10: モック実行の架空 usage は集計に混ぜない
+                    usage = lib.normalize_usage(r.get("usage"))
+                    if usage is None:
+                        invalid_rows += 1
+                        continue
+                    r["usage"] = usage
                     ts = lib.parse_iso(r.get("ts") or "")
                     if since and (ts is None or ts < since):
                         continue
@@ -344,6 +352,7 @@ def cmd_usage(args) -> int:
             "usage_mode": mode,
             "jobs": len(rows),
             "partial_jobs": partial_jobs,
+            "invalid_rows": invalid_rows,
             "by_model": {k: v for k, v in sorted(by_model.items())},
             "by_day": {k: v for k, v in sorted(by_day.items())},
             "credits_total": round(sum(v["credits"] for v in by_model.values()), 4),
@@ -356,6 +365,8 @@ def cmd_usage(args) -> int:
              else "（台帳の値をそのまま合算）"))
     print(f"ジョブ数: {len(rows)}" + (f"（{args.since} 以降）" if args.since else "")
           + (f"（うち部分計上 {partial_jobs} 件）" if partial_jobs else ""))
+    if invalid_rows:
+        print(f"不正行の除外: {invalid_rows} 件")
     if not rows:
         return 0
     print("")
