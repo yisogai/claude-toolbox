@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import os
 import signal
 import subprocess
@@ -351,13 +352,18 @@ class Pool:
             if method == "account/rateLimits/updated":
                 rate_limits = lib.normalize_rate_limits(
                     params.get("rateLimits"), "account/rateLimits/updated")
-                self.rate_limits = lib.merge_rate_limits(self.rate_limits, rate_limits)
-            log_unrouted = job is None and self.unrouted_count < 500
+                self.rate_limits = rate_limits if rate_limits else self.rate_limits
+            log_unrouted = (job is None and method != "account/rateLimits/updated"
+                            and self.unrouted_count < 500)
+            write_truncated = False
             if log_unrouted:
                 self.unrouted_count += 1
+                write_truncated = self.unrouted_count == 500
         if job is None:
             if log_unrouted:
                 lib.append_jsonl(self.pool_dir / "unrouted.jsonl", msg)
+            if write_truncated:
+                lib.append_jsonl(self.pool_dir / "unrouted.jsonl", {"truncated": True})
             return
         lib.append_jsonl(self._event_path(job), msg)
         if method in ("item/completed", "item/updated", "item/started"):
@@ -387,7 +393,7 @@ class Pool:
         elif method == "turn/completed":
             turn = params.get("turn") or {}
             usage = lib.normalize_usage(turn.get("usage") or params.get("usage"))
-            if usage:
+            if usage and job.usage is None:
                 job.usage, job.usage_source = usage, "turn/completed"
             for item in turn.get("items") or []:
                 if item.get("type") == "agentMessage" and item.get("text"):
@@ -504,10 +510,11 @@ class Pool:
                 while pending and sum(j.status == "running" for j in self.jobs) < self.args.max_parallel:
                     self.start_job(pending.popleft())
                 time.sleep(POLL_SEC)
-            drain_deadline = time.monotonic() + self.args.drain_ms / 1000.0
-            while (time.monotonic() < drain_deadline and self.rpc.proc.poll() is None
-                   and not self.rpc.eof):
-                time.sleep(min(POLL_SEC, max(0, drain_deadline - time.monotonic())))
+            if not self.abort_reason and time.monotonic() < deadline:
+                drain_deadline = min(deadline, time.monotonic() + self.args.drain_ms / 1000.0)
+                while (time.monotonic() < drain_deadline and self.rpc.proc.poll() is None
+                       and not self.rpc.eof):
+                    time.sleep(min(POLL_SEC, max(0, drain_deadline - time.monotonic())))
             return self.exit_code()
         finally:
             if self.rpc:
@@ -535,19 +542,23 @@ class Pool:
             "jobs": [{"id": j.spec["id"], "status": j.status, "thread_id": j.thread_id,
                       "duration_sec": round(((j.ended or ended) - (j.started or self.started)).total_seconds(), 3)} for j in self.jobs],
         }
-        lib.append_rate_limits({
+        rate_limits_payload = {
             "ended_at": payload["ended_at"], "job_dir": str(self.pool_dir), "mode": "pool",
             "model": self.args.model, "status": status, "rate_limits": self.rate_limits,
             "mock": bool(self.args.mock_server),
-        })
+        }
+        lib.append_rate_limits(rate_limits_payload)
+        if rate_limits_payload.get("warnings"):
+            payload["warnings"] = rate_limits_payload["warnings"]
         lib.atomic_write_json(self.pool_dir / "pool.json", payload)
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     if (not (1 <= args.max_parallel <= MAX_PARALLEL) or args.timeout_sec <= 0
-            or args.job_timeout_sec <= 0 or args.idle_timeout_sec <= 0 or args.drain_ms < 0):
-        lib.eprint("エラー: max-parallel は 1〜4、各 timeout は正数、drain-ms は 0 以上で指定してください")
+            or args.job_timeout_sec <= 0 or args.idle_timeout_sec <= 0
+            or not math.isfinite(args.drain_ms) or not 0 <= args.drain_ms <= 10000):
+        lib.eprint("エラー: max-parallel は 1〜4、各 timeout は正数、drain-ms は 0〜10000 の有限値で指定してください")
         return 1
     try:
         jobs = load_jobs(Path(args.jobs_file).expanduser().resolve())

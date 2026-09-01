@@ -139,15 +139,21 @@ def scan_rollout(thread_id: str | None, budget_sec: float = 1.5) -> dict:
             if b'"token_count"' not in raw:
                 continue
             try:
-                payload = (json.loads(raw.decode("utf-8", "replace")).get("payload") or {})
+                record = json.loads(raw.decode("utf-8", "replace"))
             except (json.JSONDecodeError, UnicodeDecodeError):
                 continue
+            if not isinstance(record, dict):
+                continue
+            payload = record.get("payload") or {}
             if payload.get("type") != "token_count":
                 continue
             info = payload.get("info") or {}
-            out["usage"] = normalize_usage(info.get("total_token_usage"))
-            out["rate_limits"] = normalize_rate_limits(payload.get("rate_limits"), "rollout.token_count")
-            return out
+            if out["rate_limits"] is None:
+                out["rate_limits"] = normalize_rate_limits(payload.get("rate_limits"), "rollout.token_count")
+            usage = normalize_usage(info.get("total_token_usage"))
+            if usage is not None:
+                out["usage"] = usage
+                return out
     return out
 
 
@@ -317,6 +323,7 @@ def _rl_window(window):
         "used_percent": window.get("used_percent", window.get("usedPercent")),
         "window_minutes": window.get("window_minutes", window.get("windowDurationMins")),
         "resets_at": window.get("resets_at", window.get("resetsAt")),
+        "resets_in_seconds": window.get("resets_in_seconds", window.get("resetsInSeconds")),
     }
 
 
@@ -325,6 +332,7 @@ def normalize_rate_limits(raw, source: str) -> dict | None:
 
     rate_limits はアカウント単位のスナップショットであり、usage のような差分は取らない。
     primary / secondary は特定の窓種へ固定して解釈しない。
+    通知は完全スナップショットのため、pool 側では正規化済みの値を置換する。
     """
     if not isinstance(raw, dict):
         return None
@@ -339,25 +347,13 @@ def normalize_rate_limits(raw, source: str) -> dict | None:
             "unlimited": credits.get("unlimited"),
             "balance": credits.get("balance"),
         } if isinstance(credits, dict) else None,
+        "individual_limit": raw.get("individual_limit", raw.get("individualLimit")),
         "plan_type": raw.get("plan_type", raw.get("planType")),
         "rate_limit_reached_type": raw.get("rate_limit_reached_type", raw.get("rateLimitReachedType")),
         "spend_control_reached": raw.get("spend_control_reached", raw.get("spendControlReached")),
         "source": source,
         "observed_at": iso(now_utc()),
     }
-
-
-def merge_rate_limits(prev, new):
-    """疎な更新に含まれる None では、直前のスナップショットを消さない。"""
-    if prev is None:
-        return new
-    if new is None:
-        return prev
-    out = dict(prev)
-    for key, value in new.items():
-        if value is not None:
-            out[key] = value
-    return out
 
 
 def append_rate_limits(payload: dict) -> None:
@@ -367,11 +363,11 @@ def append_rate_limits(payload: dict) -> None:
         return
     try:
         append_jsonl(rate_limits_ledger_path(), {
-            "ts": payload["ended_at"], "job_dir": payload.get("job_dir"),
+            "ts": payload.get("ended_at"), "job_dir": payload.get("job_dir"),
             "mode": payload.get("mode"), "model": payload.get("model"),
             "status": payload.get("status"), "rate_limits": rate_limits,
         })
-    except OSError as exc:
+    except (OSError, KeyError) as exc:
         payload.setdefault("warnings", []).append(f"rate_limits 台帳への追記に失敗した: {exc}")
 
 

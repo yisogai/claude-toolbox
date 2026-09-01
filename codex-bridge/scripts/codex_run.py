@@ -823,10 +823,11 @@ def install_signal_handlers(ctx: dict) -> None:
             p["warnings"] = list(ctx.get("warnings") or [])
         p["errors"] = (p.get("errors") or []) + [
             f"{name} を受けたため停止した（子プロセスグループも終了させた）"]
-        try:
-            append_ledger(args, ctx.get("cd") or "", p)
-        except Exception:
-            pass
+        if not ctx.get("ledger_appended"):
+            try:
+                append_ledger(args, ctx.get("cd") or "", p)
+            except Exception:
+                pass
         try:
             write_job(Path(job_dir), p)
         except OSError:
@@ -1203,6 +1204,7 @@ def main(argv=None) -> int:
         else:
             payload["warnings"].append("--schema を指定したが last.md が空のため structured_output は null")
 
+    ctx["ledger_appended"] = True
     append_ledger(args, cd, payload)
     lib.append_rate_limits(payload)
     write_job(job_dir, payload)

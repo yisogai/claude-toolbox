@@ -13,6 +13,7 @@ import tempfile
 import time
 import unittest
 from pathlib import Path
+from unittest import mock
 
 REPO = Path(__file__).resolve().parent.parent
 SCRIPTS = REPO / "scripts"
@@ -98,17 +99,72 @@ class TestPool(PoolBase):
         methods = [event.get("method") for event in events]
         self.assertLess(methods.index("thread/tokenUsage/updated"), methods.index("turn/completed"))
 
-    def test_t09_rate_limits_are_drained_and_unrouted_notification_is_kept(self):
+    def test_t09_rate_limits_are_drained_into_pool_json(self):
         proc, output = self.run_pool(
             self.jobs("rate-limit"), {"jobs": {"rate-limit": {"rate_limits_delay": 0.2}}})
         self.assertEqual(proc.returncode, 0, proc.stderr)
         pool = json.loads((output / "pool.json").read_text(encoding="utf-8"))
         self.assertEqual(pool["rate_limits"]["primary"]["window_minutes"], 10080)
         self.assertIsNone(pool["rate_limits"]["secondary"])
-        unrouted = [json.loads(line) for line in
-                    (output / "unrouted.jsonl").read_text(encoding="utf-8").splitlines()]
-        rate_events = [row for row in unrouted if row.get("method") == "account/rateLimits/updated"]
-        self.assertEqual(len(rate_events), 1)
+        # job.json は turn 完了時点の best-effort であり、その後の account 通知は pool.json を正とする。
+        self.assertIsNone(self.job(output, "rate-limit")["rate_limits"])
+        self.assertFalse((output / "unrouted.jsonl").exists())
+
+    def test_legacy_turn_usage_does_not_override_token_usage(self):
+        import codex_pool
+        args = codex_pool.build_parser().parse_args(
+            ["run", "--jobs-file", str(self.tmp / "jobs.json"), "--pool-dir", str(self.tmp / "direct")])
+        pool = codex_pool.Pool(args, [{"id": "direct", "prompt": "x", "cwd": str(self.cwd)}], self.tmp / "direct")
+        job = pool.jobs[0]
+        job.thread_id = "thread-direct"
+        pool.by_thread[job.thread_id] = job
+        pool.on_notification({"method": "thread/tokenUsage/updated", "params": {
+            "threadId": job.thread_id, "tokenUsage": {"total": {"inputTokens": 100}}}})
+        pool.on_notification({"method": "turn/completed", "params": {
+            "threadId": job.thread_id, "turn": {"usage": {"input_tokens": 10}}}})
+        self.assertEqual(job.usage["input_tokens"], 100)
+        self.assertEqual(job.usage_source, "thread/tokenUsage/updated")
+
+    def test_pool_drain_is_bounded_by_global_timeout(self):
+        started = time.monotonic()
+        proc, output = self.run_pool(
+            self.jobs("bounded-drain"), {"jobs": {"bounded-drain": {"rate_limits_delay": 1.0}}},
+            extra=("--timeout-sec", "0.2", "--drain-ms", "8000"))
+        elapsed = time.monotonic() - started
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertEqual(self.job(output, "bounded-drain")["status"], "completed")
+        self.assertLess(elapsed, 1.0, f"drain が timeout-sec を超過した: {elapsed:.3f}s")
+
+    def test_drain_ms_rejects_nonfinite_and_out_of_range_values(self):
+        for value in ("-1", "nan", "inf", "10001"):
+            with self.subTest(value=value):
+                proc, _ = self.run_pool(self.jobs("bad-drain"), extra=("--drain-ms", value))
+                self.assertEqual(proc.returncode, 1)
+
+    def test_unrouted_log_omits_rate_limits_and_marks_truncation_once(self):
+        import codex_pool
+        args = codex_pool.build_parser().parse_args(
+            ["run", "--jobs-file", str(self.tmp / "jobs.json"), "--pool-dir", str(self.tmp / "direct")])
+        pool_dir = self.tmp / "direct"
+        pool = codex_pool.Pool(args, [], pool_dir)
+        for _ in range(501):
+            pool.on_notification({"method": "notice", "params": {}})
+        pool.on_notification({"method": "account/rateLimits/updated", "params": {"rateLimits": {}}})
+        rows = [json.loads(line) for line in (pool_dir / "unrouted.jsonl").read_text(encoding="utf-8").splitlines()]
+        self.assertEqual(len(rows), 501)
+        self.assertEqual(rows[-1], {"truncated": True})
+        self.assertFalse(any(row.get("method") == "account/rateLimits/updated" for row in rows))
+
+    def test_pool_records_rate_limit_append_warnings(self):
+        import codex_pool
+        args = codex_pool.build_parser().parse_args(
+            ["run", "--jobs-file", str(self.tmp / "jobs.json"), "--pool-dir", str(self.tmp / "direct")])
+        pool = codex_pool.Pool(args, [], self.tmp / "direct")
+        with mock.patch.object(codex_pool.lib, "append_rate_limits",
+                               side_effect=lambda payload: payload.setdefault("warnings", []).append("台帳失敗")):
+            pool.write_pool()
+        payload = json.loads((self.tmp / "direct" / "pool.json").read_text(encoding="utf-8"))
+        self.assertEqual(payload["warnings"], ["台帳失敗"])
 
     def test_interleaved_notifications_are_routed_per_job(self):
         proc, output = self.run_pool(self.jobs("one", "two", "three"), {

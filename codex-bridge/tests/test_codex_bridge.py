@@ -556,6 +556,7 @@ class TestJobCli(Base):
         self.assertEqual(r.returncode, 0, r.stderr)
         data = json.loads(r.stdout)
         self.assertEqual(data["jobs"], 2)
+        self.assertEqual(data["partial_jobs"], 0)
         self.assertIn("gpt-5.6-terra", data["by_model"])
         self.assertIn("gpt-5.6-luna", data["by_model"])
         # luna: (8000+1000)*5 + 4000*0.5 + 3000*30 = 137,000 → 0.137
@@ -579,6 +580,18 @@ class TestJobCli(Base):
         self.assertEqual(data["jobs"], 1)
         self.assertAlmostEqual(data["credits_total"], 1.37, places=4)
 
+    def test_usage_reports_partial_job_count_in_json_and_text(self):
+        complete = self.ledger_row("gpt-5.6-terra", 1.37)
+        partial = self.ledger_row("gpt-5.6-terra", 0.5)
+        partial["usage_partial"] = True
+        self.write_ledger([complete, partial])
+        as_json = self.job_cli(["usage", "--json"])
+        self.assertEqual(as_json.returncode, 0, as_json.stderr)
+        self.assertEqual(json.loads(as_json.stdout)["partial_jobs"], 1)
+        as_text = self.job_cli(["usage"])
+        self.assertEqual(as_text.returncode, 0, as_text.stderr)
+        self.assertIn("（うち部分計上 1 件）", as_text.stdout)
+
 
 class TestArgvAndLib(Base):
     def test_t01_normalize_usage_accepts_camel_case(self):
@@ -595,19 +608,19 @@ class TestArgvAndLib(Base):
         camel = {
             "limitId": "codex", "limitName": None,
             "primary": {"usedPercent": 0, "windowDurationMins": 10080,
-                        "resetsAt": 1788835715},
+                        "resetsAt": 1788835715, "resetsInSeconds": 45},
             "secondary": None,
             "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
-            "individualLimit": None, "spendControlReached": None, "planType": "pro",
+            "individualLimit": "individual", "spendControlReached": None, "planType": "pro",
             "rateLimitReachedType": None,
         }
         snake = {
             "limit_id": "codex", "limit_name": None,
             "primary": {"used_percent": 0.0, "window_minutes": 10080,
-                        "resets_at": 1788835715},
+                        "resets_at": 1788835715, "resets_in_seconds": 45},
             "secondary": None,
             "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
-            "individual_limit": None, "spend_control_reached": None, "plan_type": "pro",
+            "individual_limit": "individual", "spend_control_reached": None, "plan_type": "pro",
             "rate_limit_reached_type": None,
         }
         one = lib.normalize_rate_limits(camel, "fixture")
@@ -616,14 +629,22 @@ class TestArgvAndLib(Base):
         two.pop("observed_at")
         self.assertEqual(one, two)
         self.assertEqual(one["primary"]["window_minutes"], 10080)
+        self.assertEqual(one["primary"]["resets_in_seconds"], 45)
+        self.assertEqual(one["individual_limit"], "individual")
         self.assertIsNone(one["secondary"])
 
-    def test_t04_merge_rate_limits_does_not_clear_sparse_fields(self):
-        previous = {"primary": {"used_percent": 1}, "secondary": {"used_percent": 2}}
-        merged = lib.merge_rate_limits(previous, {
-            "primary": {"used_percent": 3}, "secondary": None})
-        self.assertEqual(merged["primary"]["used_percent"], 3)
-        self.assertEqual(merged["secondary"], {"used_percent": 2})
+    def test_t04_rate_limits_notification_replaces_cleared_fields(self):
+        import codex_pool
+        args = codex_pool.build_parser().parse_args(
+            ["run", "--jobs-file", str(self.tmp / "jobs.json"), "--pool-dir", str(self.tmp / "pool")])
+        pool = codex_pool.Pool(args, [], self.tmp / "pool")
+        for reached, spend in (("primary", True), (None, None)):
+            pool.on_notification({"method": "account/rateLimits/updated", "params": {"rateLimits": {
+                "primary": None, "secondary": None, "rateLimitReachedType": reached,
+                "spendControlReached": spend,
+            }}})
+        self.assertIsNone(pool.rate_limits["rate_limit_reached_type"])
+        self.assertIsNone(pool.rate_limits["spend_control_reached"])
 
     def test_build_argv_order(self):
         import codex_run
@@ -732,6 +753,41 @@ class TestArgvAndLib(Base):
                 os.environ["CODEX_HOME"] = old
         self.assertIsNone(result["usage"])
         self.assertEqual(result["rate_limits"]["primary"]["window_minutes"], 10080)
+
+    def test_scan_rollout_continues_past_null_info_for_usage(self):
+        thread_id = "01a05ae2-7e9b-0000-0000-000000000003"
+        usage_row = {"payload": {"type": "token_count", "info": {
+            "total_token_usage": {"input_tokens": 5000}}}}
+        newest_null = {"payload": {"type": "token_count", "info": None, "rate_limits": {
+            "primary": {"window_minutes": 60}, "secondary": None}}}
+        self._rollout_path(thread_id).write_text(
+            "\n".join(json.dumps(row) for row in (usage_row, newest_null)) + "\n", encoding="utf-8")
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+        try:
+            result = lib.scan_rollout(thread_id)
+        finally:
+            if old is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old
+        self.assertEqual(result["usage"]["input_tokens"], 5000)
+        self.assertEqual(result["rate_limits"]["primary"]["window_minutes"], 60)
+
+    def test_scan_rollout_skips_non_dict_json_rows(self):
+        thread_id = "01a05ae2-7e9b-0000-0000-000000000004"
+        self._rollout_path(thread_id).write_text('[1, 2, "token_count"]\n', encoding="utf-8")
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+        try:
+            result = lib.scan_rollout(thread_id)
+        finally:
+            if old is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old
+        self.assertIsNone(result["usage"])
+        self.assertIsNone(result["rate_limits"])
 
     def test_t13_scan_rollout_handles_missing_empty_and_broken_files(self):
         old = os.environ.get("CODEX_HOME")
@@ -984,6 +1040,40 @@ class TestSignalHandling(Base):
         self.assertEqual(rows[0]["status"], "killed")
         self.assertEqual(rows[0]["usage_source"], "turn.completed")
 
+    def test_signal_handler_does_not_duplicate_already_appended_ledger(self):
+        import codex_run
+        from types import SimpleNamespace
+        from unittest import mock
+
+        job_dir = self.tmp / "signal-once"
+        args = codex_run.build_parser().parse_args(
+            ["--mode", "task", "--job-dir", str(job_dir), "--prompt", "x"])
+        col = SimpleNamespace(thread_id="th_signal", usage={"input_tokens": 10},
+                              touched=[], commands=[], errors=[], warnings=[])
+        handlers = {}
+        old_root = os.environ.get("CODEX_BRIDGE_ROOT")
+        os.environ["CODEX_BRIDGE_ROOT"] = str(self.root)
+        try:
+            codex_run.append_ledger(args, str(self.cd), {
+                "ended_at": "2026-09-01T00:00:00Z", "thread_id": "th_signal",
+                "usage": {"input_tokens": 10}, "status": "completed", "mock": False,
+            })
+            with mock.patch.object(codex_run.signal, "signal",
+                                   side_effect=lambda sig, fn: handlers.__setitem__(sig, fn)), \
+                 mock.patch.object(codex_run.os, "_exit", side_effect=SystemExit):
+                codex_run.install_signal_handlers({
+                    "args": args, "cd": str(self.cd), "job_dir": job_dir,
+                    "started": lib.now_utc(), "queued_sec": 0, "warnings": [],
+                    "proc": None, "col": col, "slot": None, "ledger_appended": True})
+                with self.assertRaises(SystemExit):
+                    handlers[signal.SIGTERM](signal.SIGTERM, None)
+        finally:
+            if old_root is None:
+                os.environ.pop("CODEX_BRIDGE_ROOT", None)
+            else:
+                os.environ["CODEX_BRIDGE_ROOT"] = old_root
+        self.assertEqual(len(self.ledger()), 1)
+
 
 class TestJobDirReuse(Base):
     """M6: 同じ job-dir を使い回したとき、前回の last.md / job.json を今回の結果にしない。"""
@@ -1206,8 +1296,29 @@ class TestUsageResumeAccounting(Base):
         partial, resumed = self.cumulative_rows()
         partial["usage_partial"] = True
         adjusted = __import__("codex_job").adjust_resumed_rows([partial, resumed])
-        self.assertEqual(adjusted[1]["usage"]["input_tokens"], 25000)
-        self.assertEqual(adjusted[1]["usage"]["output_tokens"], 5000)
+        self.assertEqual(adjusted[1]["usage"]["input_tokens"], 15000)
+        self.assertEqual(adjusted[1]["usage"]["output_tokens"], 3000)
+
+    def test_resumed_rows_telescope_across_partial_and_full_snapshots(self):
+        first = self.row(ts="2026-08-22T01:00:00Z", thread_id="th_chain", resumed=False,
+                         resume_of=None, inp=10000, out=2000, credits=0.5)
+        partial = self.row(ts="2026-08-22T02:00:00Z", thread_id="th_chain", resumed=True,
+                           resume_of="th_chain", inp=25000, out=5000, credits=1.25)
+        partial["usage_partial"] = True
+        final = self.row(ts="2026-08-22T03:00:00Z", thread_id="th_chain", resumed=True,
+                         resume_of="th_chain", inp=30000, out=6000, credits=1.5)
+        adjusted = __import__("codex_job").adjust_resumed_rows([first, partial, final])
+        self.assertEqual([row["usage"]["input_tokens"] for row in adjusted], [10000, 15000, 5000])
+        self.assertEqual(sum(row["usage"]["input_tokens"] for row in adjusted), 30000)
+
+    def test_partial_snapshot_is_a_resume_baseline_for_later_full_snapshot(self):
+        partial = self.row(ts="2026-08-22T01:00:00Z", thread_id="th_partial", resumed=False,
+                           resume_of=None, inp=9000, out=0, credits=0.5)
+        partial["usage_partial"] = True
+        final = self.row(ts="2026-08-22T02:00:00Z", thread_id="th_partial", resumed=True,
+                         resume_of="th_partial", inp=12000, out=0, credits=0.6)
+        adjusted = __import__("codex_job").adjust_resumed_rows([partial, final])
+        self.assertEqual(sum(row["usage"]["input_tokens"] for row in adjusted), 12000)
 
     def test_run_records_resume_fields_in_ledger(self):
         import codex_run

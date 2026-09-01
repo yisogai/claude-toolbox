@@ -279,8 +279,7 @@ def adjust_resumed_rows(rows: list) -> list:
                 if credits is not None:
                     new["credits_est"] = credits
                 out[i] = new
-            if not r.get("usage_partial"):
-                prev = u    # 累計前提なので基準は「補正前の値」
+            prev = u    # 累計前提なので基準は常に「補正前の値」
     return out
 
 
@@ -321,6 +320,7 @@ def cmd_usage(args) -> int:
         return 1
     if mode == "cumulative":
         rows = adjust_resumed_rows(rows)
+    partial_jobs = sum(bool(r.get("usage_partial")) for r in rows)
 
     by_model = defaultdict(lambda: {"jobs": 0, "input": 0, "cached": 0, "output": 0, "credits": 0.0})
     by_day = defaultdict(lambda: {"jobs": 0, "credits": 0.0})
@@ -343,6 +343,7 @@ def cmd_usage(args) -> int:
             "since": args.since,
             "usage_mode": mode,
             "jobs": len(rows),
+            "partial_jobs": partial_jobs,
             "by_model": {k: v for k, v in sorted(by_model.items())},
             "by_day": {k: v for k, v in sorted(by_day.items())},
             "credits_total": round(sum(v["credits"] for v in by_model.values()), 4),
@@ -353,7 +354,8 @@ def cmd_usage(args) -> int:
     print(f"usage_mode: {mode}"
           + ("（resume 行はスレッド累計とみなし直前行との差分で計上）" if mode == "cumulative"
              else "（台帳の値をそのまま合算）"))
-    print(f"ジョブ数: {len(rows)}" + (f"（{args.since} 以降）" if args.since else ""))
+    print(f"ジョブ数: {len(rows)}" + (f"（{args.since} 以降）" if args.since else "")
+          + (f"（うち部分計上 {partial_jobs} 件）" if partial_jobs else ""))
     if not rows:
         return 0
     print("")
