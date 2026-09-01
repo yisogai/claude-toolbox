@@ -419,3 +419,109 @@ pool の makespan は最遅ジョブで決まる。実測 pool1 は 4ジョブ�
 - `/private/tmp/claude-504/-Users-isogai--claude/1f8b1193-46c5-4b5b-8341-360159ddf8eb/scratchpad/smoke/{sol,terra}/job.json`
 - `~/.codex/sessions/**/*.jsonl`（261 ファイル走査。`resets_at 1788491253` = 2026-09-04 12:07 JST、`secondary: null`、過去窓ピーク 3.0%）
 - `codex-cli 0.149.1` の `codex exec --help` / `codex --help`（timeout 系フラグ不在を独立確認）
+
+---
+
+# 追補: sol/terra ペア A/B 実測（2026-09-01）
+
+プロトコル: 6ペア12ジョブ、同一プロンプト・同一 effort・完全直列（pool 不使用）、write 系は同一コミットからの独立クローン、実行順はペアごとに交互。品質判定はブラインド（opus/xhigh の独立判定者6体、モデル対応表は非開示。identity_guess は6体全員「不明」＝ブラインド成立）。コスト・所要は計器修理済みの job.json / codex_usage.jsonl で採取（12ジョブ全件 status=completed）。
+
+## 勝敗と裁定
+
+| ペア | 種別/effort | 勝者 | margin | スコア | credits比(sol/terra) | 要点 |
+|---|---|---|---|---|---|---|
+| P1 | 仕様確定の小実装/med | sol | 小 | 8.5:7.5 | 2.41× | 生成 diff は実質同一。差は報告内の検証の丁寧さのみ |
+| P2 | 曖昧な実装/med | sol | 小 | 7.6:7.0 | 1.83× | 堅牢化カバレッジは同点。mock 行の解釈とテストの質で sol |
+| P3 | seeded レビュー(8バグ)/high | sol | 小 | 8:7 | 4.87× | **検出は完全同等**（両者 TP 7/8・FP 0・追加真バグ各1）。差は実害説明の正確さ（terra に事実誤り1件） |
+| P4 | 否定命題の確定/high | sol | 小 | 8.7:8.0 | 1.65× | sol は全行読了+横断 grep で立証、used_percent の混同点にも到達 |
+| P5 | 一次情報の突合調査/high | **sol** | **大** | 9:6.5 | 3.23× | terra は存在しない矛盾を1件捏造。sol は主張10件全て抜き取り検証と一致、changelog の決定的差分（販促表記は sol のみ）に到達 |
+| P6 | 機械的集計/med | 同点 | なし | 10:10 | 2.00× | 両者 ground truth 7セル完全一致 |
+
+## 確信度の更新（本編マップへの裁定）
+
+- **仕様確定の単発実装 = terra**: 確信度 **高** へ（ペアで diff 実質同一。2.4倍を払う価値なし）
+- **機械的作業 = luna/terra**: 高 へ（完全同点で2倍）
+- **深い調査・統合段 = sol/high**: **中〜高** へ（唯一の大差。terra の捏造 vs sol の全一致は、正確さが本体の調査で決定的）
+- **反証検証 = sol/high**: 中 へ（小差の支持。ただし sol プレミアムが最安の 1.65× で済む領域でもある）
+- **recall 重視レビュー = sol/high**: **据え置き（中）**。ペア実測では検出数が完全同等で、sol の優位は実害説明の正確さのみ。**日常レビューは terra/high で十分**。sol はリリース前・セキュリティ・並行処理（実害説明の正確さが判断を左右する場面）に限定を維持
+- **曖昧・多ファイル実装 = sol**: 中 へ（小差の支持。単一ファイル規模の曖昧タスクなら terra でもほぼ同等）
+
+## 価格の訂正（P5 の成果）
+
+- 販促価格は **sol のみ**。Terra/Luna の現行価格（$2/$12、$0.20/$1.20）に販促表記はない
+- 「2026-11-21」は終了日ではなく「**少なくともこの日まで**」の下限。終了後の sol 価格は未確約（定価 $5/$30 に戻るなら sol:terra 単価比 2.5 倍）
+- 本編の「販促終了 2026-11-21 で 2.5 倍化」という記述はこの内容で読み替えること
+
+## 限界
+
+- 各ペア n=1。margin「小」の勝敗は再現性未確認
+- P2 の duration 比（1.05×）のみ外部ジョブの flock 待ち混入の可能性
+- cached 比率が全ジョブ 70〜90% で、credits 比はキャッシュ状態の影響を受ける
+- 週次 rate_limits の used_percent は12ジョブで不動（整数%分解能）＝この規模のコスト計器には使えない。コスト測定は credits_est と台帳 token 合計に拠る
+
+## 計測データ（原本転記）
+
+品質の優劣判定は含まない。実行条件と計器の値のみ。
+生データ: `measurements.json` / 各 `pN/job-<model>/job.json` / モデル対応: `mapping.json`。
+
+### 実行条件
+- 全ジョブ `codex_run.py` 直列、`--timeout-sec 3600 --idle-timeout-sec 600`。
+- ペア内は同一プロンプトファイル・同一 effort。実行順は交互（P1 sol→terra、P2 terra→sol、…）。
+- write 系（P1/P2）は toolbox 2b1b808 からの `git clone --local` を 2 部ずつ用意して `--write`。
+- read 系（P3〜P6）は toolbox 本体（P6 のみ `ab/p6`）を cwd に read-only。
+- 12 ジョブすべて `status = completed`、`usage_source = turn.completed`、`usage_partial = false`、`errors` 空。
+
+### 計測表
+
+| ペア | 種別 / effort | モデル | ラベル | status | duration(s) | credits_est | input | cached_in | output | reasoning |
+|---|---|---|---|---|---:|---:|---:|---:|---:|---:|
+| P1 | write / medium | sol | X | completed | 120.8 | 5.2952 | 173,669 | 155,136 | 3,781 | 1,355 |
+| P1 | write / medium | terra | Y | completed | 37.4 | 2.1976 | 130,943 | 107,264 | 1,591 | 342 |
+| P2 | write / medium | terra | X | completed | 194.3 | 6.4640 | 557,983 | 508,416 | 4,812 | 1,430 |
+| P2 | write / medium | sol | Y | completed | 203.9 | 11.7998 | 482,243 | 435,200 | 5,487 | 2,150 |
+| P3 | review / high | sol | X | completed | 255.1 | 20.7191 | 668,191 | 589,056 | 13,830 | 10,719 |
+| P3 | review / high | terra | Y | completed | 102.4 | 4.2587 | 112,201 | 79,104 | 7,361 | 5,616 |
+| P4 | read / high | terra | X | completed | 98.4 | 8.3014 | 605,717 | 534,016 | 6,821 | 2,420 |
+| P4 | read / high | sol | Y | completed | 144.3 | 13.6601 | 397,021 | 335,872 | 8,373 | 3,846 |
+| P5 | read+web / high | terra | X | completed | 74.3 | 5.6952 | 308,392 | 239,872 | 3,566 | 1,600 |
+| P5 | read+web / high | sol | Y | completed | 153.1 | 18.3992 | 652,779 | 558,336 | 6,743 | 3,352 |
+| P6 | read / medium | terra | X | completed | 14.1 | 1.2308 | 45,462 | 27,136 | 596 | 45 |
+| P6 | read / medium | sol | Y | completed | 18.6 | 2.4618 | 45,507 | 28,160 | 891 | 248 |
+
+ペア内比（sol / terra）:
+
+| ペア | duration 比 | credits_est 比 | output tokens 比 | reasoning tokens 比 |
+|---|---:|---:|---:|---:|
+| P1 | 3.23× | 2.41× | 2.38× | 3.96× |
+| P2 | 1.05× | 1.83× | 1.14× | 1.50× |
+| P3 | 2.49× | 4.87× | 1.88× | 1.91× |
+| P4 | 1.47× | 1.65× | 1.23× | 1.59× |
+| P5 | 2.06× | 3.23× | 1.89× | 2.10× |
+| P6 | 1.32× | 2.00× | 1.49× | 5.51× |
+
+`credits_est` は ChatGPT プランのクレジット**概算**であり請求額ではない。
+
+### write 系の客観事実（品質判定ではない）
+
+| ペア/モデル | 変更ファイル | 追加行 | 削除行 | 検証 | 結果 | 範囲外変更 |
+|---|---|---:|---:|---|---|---|
+| P1 / sol | install.sh | 10 | 7 | `bash -n install.sh` | rc=0 | なし（install.sh のみ） |
+| P1 / terra | install.sh | 10 | 7 | `bash -n install.sh` | rc=0 | なし（install.sh のみ） |
+| P2 / sol | codex_job.py, test_codex_bridge.py | 28 | 0 | `python3 -m unittest discover -s codex-bridge/tests` | rc=0（全緑） | なし |
+| P2 / terra | codex_job.py, test_codex_bridge.py | 31 | 0 | `python3 -m unittest discover -s codex-bridge/tests` | rc=0（全緑） | なし |
+
+- 検証は**私（executor）が各クローンで実際に実行**した結果。Codex の自己申告ではない。
+- P1 は両者とも `EXCLUDE_DIRS=(experiments __pycache__ .pytest_cache)` を定義し `var` を含めていない
+  （定義位置は sol=134 行目、terra=34 行目）。
+- P2 は両者とも新規ファイルを作らず既存 2 ファイルへの純増（削除 0 行）。
+- P6 は両者の出力とも前置き・コードフェンス無しで `json.loads` 可能（内容の正誤は判定していない）。
+
+### rate_limits（primary、window 10080 分）
+- 実験前（04:13:08Z）: `used_percent = 1`
+- 実験後（04:50:15Z）: `used_percent = 1.0`
+- 実験中に追記された 13 行すべてで `used_percent = 1.0`。12 ジョブでは週次窓の整数％が動かなかった。
+- `secondary` は全行 null。
+
+### 台帳
+- `codex-bridge/var/codex_usage.jsonl`: 80 行 → 93 行（本実験の 12 行 + 外部ジョブ 1 行）。
+- `codex-bridge/var/codex_rate_limits.jsonl`: 実験中に 13 行追記。

@@ -1,0 +1,263 @@
+{
+  "rows": [
+    {
+      "pair": "p1",
+      "model": "sol",
+      "label": "X",
+      "status": "completed",
+      "duration_sec": 120.823,
+      "credits_est": 5.2952,
+      "input_tokens": 173669,
+      "cached_input_tokens": 155136,
+      "output_tokens": 3781,
+      "reasoning_output_tokens": 1355,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p1",
+      "model": "terra",
+      "label": "Y",
+      "status": "completed",
+      "duration_sec": 37.421,
+      "credits_est": 2.1976,
+      "input_tokens": 130943,
+      "cached_input_tokens": 107264,
+      "output_tokens": 1591,
+      "reasoning_output_tokens": 342,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p2",
+      "model": "terra",
+      "label": "X",
+      "status": "completed",
+      "duration_sec": 194.259,
+      "credits_est": 6.464,
+      "input_tokens": 557983,
+      "cached_input_tokens": 508416,
+      "output_tokens": 4812,
+      "reasoning_output_tokens": 1430,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p2",
+      "model": "sol",
+      "label": "Y",
+      "status": "completed",
+      "duration_sec": 203.88,
+      "credits_est": 11.7998,
+      "input_tokens": 482243,
+      "cached_input_tokens": 435200,
+      "output_tokens": 5487,
+      "reasoning_output_tokens": 2150,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p3",
+      "model": "sol",
+      "label": "X",
+      "status": "completed",
+      "duration_sec": 255.124,
+      "credits_est": 20.7191,
+      "input_tokens": 668191,
+      "cached_input_tokens": 589056,
+      "output_tokens": 13830,
+      "reasoning_output_tokens": 10719,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p3",
+      "model": "terra",
+      "label": "Y",
+      "status": "completed",
+      "duration_sec": 102.408,
+      "credits_est": 4.2587,
+      "input_tokens": 112201,
+      "cached_input_tokens": 79104,
+      "output_tokens": 7361,
+      "reasoning_output_tokens": 5616,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p4",
+      "model": "terra",
+      "label": "X",
+      "status": "completed",
+      "duration_sec": 98.446,
+      "credits_est": 8.3014,
+      "input_tokens": 605717,
+      "cached_input_tokens": 534016,
+      "output_tokens": 6821,
+      "reasoning_output_tokens": 2420,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": [
+        "不正な UTF-8 を含むイベント行を置換して読み込んだ",
+        "不正な UTF-8 を含むイベント行を置換して読み込んだ",
+        "不正な UTF-8 を含むイベント行を置換して読み込んだ",
+        "不正な UTF-8 を含むイベント行を置換して読み込んだ"
+      ]
+    },
+    {
+      "pair": "p4",
+      "model": "sol",
+      "label": "Y",
+      "status": "completed",
+      "duration_sec": 144.309,
+      "credits_est": 13.6601,
+      "input_tokens": 397021,
+      "cached_input_tokens": 335872,
+      "output_tokens": 8373,
+      "reasoning_output_tokens": 3846,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": [
+        "不正な UTF-8 を含むイベント行を置換して読み込んだ"
+      ]
+    },
+    {
+      "pair": "p5",
+      "model": "terra",
+      "label": "X",
+      "status": "completed",
+      "duration_sec": 74.306,
+      "credits_est": 5.6952,
+      "input_tokens": 308392,
+      "cached_input_tokens": 239872,
+      "output_tokens": 3566,
+      "reasoning_output_tokens": 1600,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p5",
+      "model": "sol",
+      "label": "Y",
+      "status": "completed",
+      "duration_sec": 153.139,
+      "credits_est": 18.3992,
+      "input_tokens": 652779,
+      "cached_input_tokens": 558336,
+      "output_tokens": 6743,
+      "reasoning_output_tokens": 3352,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": []
+    },
+    {
+      "pair": "p6",
+      "model": "terra",
+      "label": "X",
+      "status": "completed",
+      "duration_sec": 14.065,
+      "credits_est": 1.2308,
+      "input_tokens": 45462,
+      "cached_input_tokens": 27136,
+      "output_tokens": 596,
+      "reasoning_output_tokens": 45,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": [
+        "--cd が git 管理外のため --skip-git-repo-check を付けた: /private/tmp/claude-504/-Users-isogai--claude/1f8b1193-46c5-4b5b-8341-360159ddf8eb/scratchpad/ab/p6"
+      ]
+    },
+    {
+      "pair": "p6",
+      "model": "sol",
+      "label": "Y",
+      "status": "completed",
+      "duration_sec": 18.555,
+      "credits_est": 2.4618,
+      "input_tokens": 45507,
+      "cached_input_tokens": 28160,
+      "output_tokens": 891,
+      "reasoning_output_tokens": 248,
+      "usage_source": "turn.completed",
+      "usage_partial": false,
+      "errors": [],
+      "warnings": [
+        "--cd が git 管理外のため --skip-git-repo-check を付けた: /private/tmp/claude-504/-Users-isogai--claude/1f8b1193-46c5-4b5b-8341-360159ddf8eb/scratchpad/ab/p6"
+      ]
+    }
+  ],
+  "write_facts": {
+    "p1/sol": {
+      "changed_files_tracked": [
+        "install.sh"
+      ],
+      "new_files": [],
+      "diff_added_lines": 10,
+      "diff_deleted_lines": 7,
+      "verify_cmd": "bash -n install.sh",
+      "verify_returncode": 0,
+      "verify_green": true
+    },
+    "p1/terra": {
+      "changed_files_tracked": [
+        "install.sh"
+      ],
+      "new_files": [],
+      "diff_added_lines": 10,
+      "diff_deleted_lines": 7,
+      "verify_cmd": "bash -n install.sh",
+      "verify_returncode": 0,
+      "verify_green": true
+    },
+    "p2/terra": {
+      "changed_files_tracked": [
+        "codex-bridge/scripts/codex_job.py",
+        "codex-bridge/tests/test_codex_bridge.py"
+      ],
+      "new_files": [],
+      "diff_added_lines": 31,
+      "diff_deleted_lines": 0,
+      "verify_cmd": "python3 -m unittest discover -s codex-bridge/tests",
+      "verify_returncode": 0,
+      "verify_green": true
+    },
+    "p2/sol": {
+      "changed_files_tracked": [
+        "codex-bridge/scripts/codex_job.py",
+        "codex-bridge/tests/test_codex_bridge.py"
+      ],
+      "new_files": [],
+      "diff_added_lines": 28,
+      "diff_deleted_lines": 0,
+      "verify_cmd": "python3 -m unittest discover -s codex-bridge/tests",
+      "verify_returncode": 0,
+      "verify_green": true
+    },
+    "p3/sol": {},
+    "p3/terra": {},
+    "p4/terra": {},
+    "p4/sol": {},
+    "p5/terra": {},
+    "p5/sol": {},
+    "p6/terra": {},
+    "p6/sol": {}
+  }
+}

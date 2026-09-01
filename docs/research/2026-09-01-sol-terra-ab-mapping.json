@@ -1,0 +1,26 @@
+{
+  "p1": {
+    "X": "sol",
+    "Y": "terra"
+  },
+  "p2": {
+    "X": "terra",
+    "Y": "sol"
+  },
+  "p3": {
+    "X": "sol",
+    "Y": "terra"
+  },
+  "p4": {
+    "X": "terra",
+    "Y": "sol"
+  },
+  "p5": {
+    "X": "terra",
+    "Y": "sol"
+  },
+  "p6": {
+    "X": "terra",
+    "Y": "sol"
+  }
+}

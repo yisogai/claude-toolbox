@@ -39,7 +39,7 @@ description: Claude Code から OpenAI Codex CLI（codex exec）を非対話・�
      - `gpt-5.6-sol`: 曖昧・多ファイル・long-horizon 実装／recall 重視レビュー（リリース前・セキュリティ・並行処理。指摘はフィルタ段必須）／否定命題の確定・出典突合など厳密系の検証・調査統合段。**pool に載せない**（usage が台帳に載らない）。`codex_run` 直列で `--timeout-sec 3600` を明示し、timeout 後のリトライは terra で行う。
      - `gpt-5.6-terra`（effort `high`）: 上記以外の既定。仕様確定の単発実装・広く浅い Web 調査・一次トリアージレビュー。
      - `gpt-5.6-luna`: 機械的作業（抽出・分類・形式変換）のみ。入力 32K token 超では使わない。
-     - コスト目安: sol は同一タスクで terra の約2倍（実務レビューの非ペア観測で 4.6〜5.5倍）。販促終了 2026-11-21 で単価比 2.5 倍化 → 方針再評価。
+     - コスト目安（ペア A/B 実測 2026-09-01・n=6、詳細は docs/research/2026-08-28-sol-terra-luna-suitability.md 追補）: sol は credits で terra の 1.65〜4.87倍・所要 1.05〜3.23倍。品質は sol 5勝1分だが大差は深い Web 調査のみ（レビューは検出数同等）→ 日常レビューは terra/high で足りる。販促価格は sol のみ・少なくとも 2026-11-21 まで（終了後未確約、定価なら単価比 2.5 倍）→ 期限接近で再評価。
    - **並列度は 1**（ChatGPT 認証は並列で token_invalidated が出る既知問題）。`--max-parallel` は上げない。
    - 終了コード: 0=completed / 2=failed / 3=timeout・idle_timeout / 4=codex 不在・認証エラー / 1=その他。
      **4 が出たら導入・ログインの問題**なので、リトライせずユーザーに報告する。

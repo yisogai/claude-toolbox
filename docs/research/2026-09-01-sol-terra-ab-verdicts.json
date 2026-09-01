@@ -1,0 +1,62 @@
+[
+  {
+    "pair": "P1:仕様確定実装",
+    "winner": "X",
+    "margin": "small",
+    "x_score": 8.5,
+    "y_score": 7.5,
+    "rationale": "生成コードは実質同一。両者とも `EXCLUDE_DIRS=(experiments __pycache__ .pytest_cache)` を1か所に置き、`for exclude_dir in \"${EXCLUDE_DIRS[@]}\"` で回し、`\"$DEST/$exclude_dir\"` を正しくクォートし、`rm -rf` 失敗時の `exit 1` と成功時 echo の位置（if 内）という既存挙動を保存。var/ 除外なし、退避先・--force も無変更。`#!/usr/bin/env bash` かつ bash 5.2 で `set -u` 下の配列展開も問題なし。差が付くのは検証と細部。\n\nX の優位: 受入条件「配備先に上記ディレクトリがあれば除去され、除去に失敗したときは従来どおりエラー終了する」を、install.sh 本体を走らせずに一時ディレクトリで対象ブロックを実行し「3対象を削除し var/ を保持」「rm 失敗を模擬: エラー表示・終了コード 1」まで実挙動で確認している。禁止事項（実配備）を破らずに条件を満たす手を見つけた点が実質的に上。またコメント罫線幅が 82 桁で、周辺（102/122/133/142 行）の既存幅と一致。\n\nY の優位/劣位: `EXCLUDE_DIRS` を SKILLS_DEST/BACKUPS_DEST と同じ定数ブロック（34 行）に置いた点は設計として妥当（ただしハンクが2つに増える）。一方で検証は `bash -n`・`git diff --check`・diff 目視のみで、「[未検証] 実配備先での除去動作は未実行」と自認しながら受入条件の「各対象を除去し失敗時はエラー終了」に [x] を付けており、報告内で軽い矛盾がある。罫線幅は 83 桁で近傍の 82 桁とわずかにずれる。",
+    "metrics": "機能差分: 実質同一（挙動差ゼロ）／ハンク数: X=1, Y=2（Y は定数を先頭ブロックに配置）／検証項目: X=5（bash -n, git diff --check, 一時DIRでのブロック実行, rm失敗の模擬, 差分限定確認, うち動的検証2）, Y=3（すべて静的）＋自認の未検証1／受入条件の実挙動確認: X=あり, Y=なし／罫線幅（周辺の既存は82桁）: X=82, Y=83／仕様外変更: 双方なし",
+    "identity_guess": "不明。両者とも指定された6見出しを順序どおり厳守し、日本語の書き分け・チェックボックス様式もほぼ同型で、文体からの識別材料に乏しい。強いて言えば Y の変更ファイル行が絶対パス＋`:34` 行番号リンク形式（`/private/tmp/.../install.sh:34`）である点はエディタ連携を意識した出力様式の癖に見えるが、モデル同定の根拠としては弱いため断定しない。"
+  },
+  {
+    "pair": "P2:曖昧実装",
+    "winner": "Y",
+    "margin": "small",
+    "x_score": 7,
+    "y_score": 7.6,
+    "rationale": "両者のパッチを別コピーに実際に適用し、同一の敵対的台帳（壊れJSON・`[1,2,3]`・`\"文字列\"`・usage が str/list・usage 欠損・mock+不正usage・usage 値が \"abc\"）で実行して比較した。集計結果は完全に一致（jobs=2 / credits_total=2.0）、残る穴も同一（credits_est=\"abc\" で ValueError、model がリストで unhashable、ts が int で AttributeError が両者とも未防御）。よって堅牢化カバレッジは実質同点。差は細部。(1) 判定順序: X は usage 検査を `if r.get(\"mock\")` の前に置いたため、意図的に除外される mock 行まで「不正行」に計上（実測 X=7 件 / Y=6 件）。Y は従来の mock スキップを保ち、その解釈を「空行とmock行は従来どおり不正行に数えない」と明示しており筋が良い。(2) テスト: Y は `assertAlmostEqual(data[\"credits_total\"], 1.37)` で正常行の集計が壊れていないことまで検証。X は jobs と invalid_rows のみ。(3) 検証報告: Y は `git status --short`（実台帳未変更・範囲2ファイル）と `git diff --check` まで実施し、禁止事項の充足を裏取り。X は py_compile と関連2件のみ。X の優位点は、テキスト出力を件数>0 のときだけ出す点（隣接する `partial_jobs` の条件付き表示という既存様式に合致）。Y は常に「不正行の除外: 0 件」を出力しノイズになる。ただしこれは小さな設計上の好みで、上記3点を覆さない。過剰実装は双方なし。",
+    "metrics": "実測（同一敵対的台帳10行）: 集計 jobs=2/credits_total=2.0 で両者一致。invalid_rows は X=7・Y=6（差は mock+不正usage 行の扱い）。未防御で落ちる入力は両者同一 3 種（credits_est 非数値=ValueError, model がリスト=TypeError, ts が int=AttributeError）。usage 値の型不正（\"abc\"/入れ子dict）は両者とも normalize_usage で 0 に丸めて rc=0。パッチ適用性: 両者 patch -p1 クリーン適用。テスト観点: 壊れJSON/str/list=両者カバー、非dict最上位行・usage欠損=両者未テスト、正常行の集計不変アサート=Y のみ。",
+    "identity_guess": "不明。両者とも同じ委譲テンプレート（AGENTS.md 準拠の `## 結果:` 見出し構成）に従う実装者出力で、同一箇所・同一方針の差分・同一の「一部完了（sandbox の ps 拒否）」報告まで酷似しており、文体や粒度からモデルを特定できる材料はない。強いて言えば Y の方が検証コマンドの列挙（git diff --check / git status --short）が細かく、X は日本語コメントを diff に足す傾向があるが、いずれも同系統の出力で識別根拠にならない。"
+  },
+  {
+    "pair": "P3:seededレビュー",
+    "winner": "X",
+    "margin": "small",
+    "x_score": 8,
+    "y_score": 7,
+    "rationale": "検出範囲は同点。両者とも B1/B2/B3/B4/B5/B6/B8 を特定し、B7（`self.last_activity` と `unrouted_count` のロック外移動によるデータ競合・lost update）だけを揃って見落とした。一方で両者とも answer key に無い9個目の実バグ——`finish()` の `not in (\"running\",\"queued\")` → `!= \"running\"` 化——を指摘しており、これは実コードで `finalise_unfinished()` が queued ジョブに `finish()` を呼ぶ（codex_pool.py:451-457）ことを確認したので真バグ。誤検知は双方ゼロ（`src.pop(camel)`・`frozenset` 化・定数化などの良性変更を挙げていない）。\n\n差は実害シナリオの正確さに出た。(1) B4 で Y は「rate limits が無い実ジョブでは `null` の台帳行を追記し」と書くが、新条件 `if not rate_limits and not payload.get(\"mock\")` では実ジョブ（mock=None）かつ rate_limits 無しは両条件が真で return するため追記されない。null 行が出るのは mock 経路のみで、Y の前半とその後の「通知を受け取れなかった実行ごとに蓄積される」は誤り。X は「`mock` が真の場合は rate-limit の有無にかかわらず追記処理へ進む」と正しく書き分けている。(2) B3 で X は「reader が終了して `eof` になり、pool は『app-server が途中で終了した』と判断して実行中ジョブを失敗扱い」とするが、`_read` の `finally` が `eof=True` を立て run() が即 `finalise_unfinished(\"failed\", ...)` する実装（codex_pool.py:202-206, 493-494）と一致し、answer key の「idle timeout に落ちる」より精密。Y は「通知処理が止まる」までで停止。(3) B5 で X は fixture 実値（output 3,000 / reasoning 1,200、terra output 300）から 1.37→1.73 と定量化し、mock_codex.py:41 と test の assert 1.37 に照合して正しい。Y は定性記述のみ。網羅・簡潔さは同等で、正確さで X が上。",
+    "metrics": "X: TP 7/8 (miss B7), 追加真バグ 1 (codex_pool.py:415 finish() が queued を終端しない), FP 0 ／ Y: TP 7/8 (miss B7), 追加真バグ 1 (同上), FP 0。ただし Y は B4 の実害記述に事実誤り1件（実ジョブで null 行が追記されるとした）。",
+    "identity_guess": "不明。両者とも同一の報告テンプレート（結果/変更ファイル/実行した検証/未検証・仮定）に沿い、日本語・指摘順・行番号の付け方までほぼ同型で、文体からモデルを分離できなかった。X 本文の `<MODEL>` はハーネス側の匿名化置換とみられ、識別情報にはならない。"
+  },
+  {
+    "pair": "P4:否定命題",
+    "winner": "Y",
+    "margin": "small",
+    "x_score": 8,
+    "y_score": 8.7,
+    "rationale": "両者とも「存在しない」を明言し正しい。実コードと突合せた結果、引用は双方ほぼ正確（私自身の grep でも requests/urllib/httpx/http.client/https?:// /billing/api.openai は3ファイルに0件、正解と一致）。差は3点。(1) 否定命題の立証方法: Y は「2,243行を全行確認」（wc -l と完全一致）と通信・課金語の横断 grep を明示し、X は import ブロック不在＋subprocess 起動先の列挙に留まる。否定の網羅性根拠として Y が上。(2) 混同箇所: 評価軸が名指しする used_percent を Y のみが独立項目として挙げ「rate-limit window の値で credits_est の式に使われない」と codex_lib.py:319-327 / 389-396 で示す。X は credits.balance には触れるが used_percent に到達していない。Y は rollout の rate_limits も追加。逆に X のみ usage_partial の「下限見積り」（codex_run.py:1172）を挙げており、ここは X が優る。(3) 留保: Y は credits.balance の上流算出・鮮度が3ファイルからは未確定と [未検証] で切り出し、結論に影響しないと正しく限定。X にはこの明示がない。一方 X は codex_pricing.json:2-13/15-20 を直接引用し、ハードコード単価表と [未確認] 注記を一次で押さえた点で優る（Y は codex_lib.py:377-380 の docstring 経由のみで単価表本体を開いていない）。総合で Y が僅差で上。",
+    "metrics": "引用精度: X=約14レンジ全て実コードと整合（緩い範囲2件: codex_lib.py:108-156 は codex_home+scan_rollout を跨ぐ、codex_run.py:27-44）。Y=約30参照が逐語引用付きで全て一致、ただし範囲の過大表記3件（codex_run.py:1166-1172 の引用実体は1166-1170、codex_pool.py:382-389 は383-385のコメントを省略、codex_lib.py:63-68 の引用が64行目docstringを省略）。誤引用・捏造はどちらも0件。混同箇所の列挙数: X=5 / Y=6。評価軸が名指しした2項目の到達: X=1/2（単価表[未確認]○、used_percent×）、Y=2/2。単価表実ファイルの直接引用: X=有 / Y=無。否定の網羅性根拠: X=import+subprocess列挙 / Y=全行読了+横断grep+git diff。read-only 遵守: 両者○。",
+    "identity_guess": "不明。文体上の傾向としては、Y が「受入条件の充足」「未検証・仮定」「提案（未対応）」等ユーザーの CLAUDE.md 作業プロトコルの節構成をほぼ写しており指示追従の強いエージェント、X は絶対パスを埋め込んだ markdown リンク形式の引用という別系統の作法に見えるが、いずれも文体からの推測に過ぎず、モデル同定の根拠としては不十分と判断する。"
+  },
+  {
+    "pair": "P5:一次情報調査",
+    "winner": "Y",
+    "margin": "large",
+    "x_score": 6.5,
+    "y_score": 9,
+    "rationale": "両者とも中核3問（販促は Sol のみ／2026-11-21 は「少なくとも」であり確定終了日でない／終了後価格は未確約）を正答し、確定できない点も明示した。差は「矛盾の明示」で出た。X は「API のマーケティングページ（openai.com/api/）は Sol $5/$30、Terra $2.50/$15、Luna $1/$6 を表示しており現行料金表と矛盾」と書くが、実際に取得すると同ページは $4.00/$20.00、$2.00/$12.00、$0.20/$1.20 と現行価格＋「promotional pricing is available at least through November 21, 2026」の脚注を載せており、この指摘は誤り（存在しない矛盾の捏造）。X の矛盾章はこれ一点で構成されるため軸ごと失われる。対して Y の「openai.com/index/gpt-5-6/ 本文に当初価格が残り上部に後日更新が追記」は取得結果と一致し、「未解決の同時点矛盾ではなく時系列更新」という整理も正確。一次情報到達度も Y が上で、Sol の 8/21 changelog だけが \"promotional\" と明記し Terra/Luna の 7/30 エントリは同語を使わない、という決定的差分に到達（X は changelog 未参照で community 投稿を「公式 Announcement」と格上げ）。Y は >272K の 2x/1.5x、料金ページに更新日表示がない点も補足。X は簡潔さと、旧 cached $0.50 を community の新旧表から直接引いた点で優るが、最上位軸の正確さで失点した。",
+    "metrics": "抜き取り検証: X=8主張中1件誤り（openai.com/api/ の表示価格＝矛盾指摘が事実と不一致。実測は $4/$0.40/$20・$2/$0.20/$12・$0.20/$0.02/$1.20＋Nov 21 脚注）。Y=10主張中0件誤り（pricing/model/changelog/blog/community 全て一致、>272K の 2x・1.5x も verbatim 一致）。一次情報カバレッジ: X=4種（pricing・model・公式ブログ・community）／Y=5種（＋developers changelog、canonical）。出典URL付与率は両者ほぼ100%。共通の正答: 販促=Sol のみ、11-21=下限日、終了後価格=未確約、Terra $2/$0.20/$12・Luna $0.20/$0.02/$1.20。",
+    "identity_guess": "不明。両出力とも自己のモデル名・生成主体への言及が一切なく、文体（日本語・結論先出し・見出し構成）も課題の出力指定に沿った範囲で差が小さい。強いて挙げれば X は community.openai.com を主軸に据え出典数を絞る調査型、Y は developers.openai.com の changelog まで辿り区別立て（「〜まで利用可能／〜をもって終了／〜から値上げ」の3分割）を多用する分析型という傾向差があるが、これは探索の深さの差でありモデル特定の根拠にはならない。判定にはこの推測を一切用いていない。"
+  },
+  {
+    "pair": "P6:機械的集計",
+    "winner": "tie",
+    "margin": "none",
+    "x_score": 10,
+    "y_score": 10,
+    "rationale": "ground_truth.json の 7 セル（luna|pool, luna|task, sol|review, sol|task, terra|imagegen, terra|review, terra|task）について、件数・input_tokens 合計・output_tokens 合計・credits_est 合計の 4 値をスクリプトで突合したところ、X・Y とも 7/7 セルが完全一致し、過不足セルはゼロだった（例: terra|task = 42 / 65206405 / 391425 / 573.5034、sol|review = 3 / 3543614 / 48358 / 102.5673）。差分は体裁のみ。X は 1 行のミニファイ JSON で credits を生の浮動小数（0.46730000000000005、573.5033999999999）のまま出し、キーは input_tokens 等。Y は整形済みで 4 桁丸め（0.4673、573.5034）、キーは input_tokens_sum 等の接尾辞付き、model→mode の決定的ソート。丸めとキー名は同値とみなす規定どおりで、正確さに差はない。両者とも前置き・コードフェンス・説明文を一切付けず「JSON のみ」の指示を満たしており、形式の素直さでも優劣がない。よって tie、margin は none。なお Y のソート順は sol 群 (review 3 / task 6) と terra 群 (imagegen / review 14 / task 42) の所属が正解の grouping と整合することを間接的に示すが、X にも矛盾はなく、判定を分ける材料にはならない。",
+    "metrics": "X: 完全一致（7/7 セル、不一致セルなし。credits は未丸めの生 float 表記 0.46730000000000005 等だが値は同値）／Y: 完全一致（7/7 セル、不一致セルなし。credits は 4 桁丸め）。両者とも余計な前置き・コードフェンスなしの純 JSON。malformed_lines/total_lines は課題要求外のため両者とも非出力で減点なし。",
+    "identity_guess": "不明。両出力とも sol/terra のモデル名が匿名化で \"gpt-5.6-&lt;MODEL&gt;\" に置換されており、命名の癖から辿れない。X はミニファイ＋生 float（素朴な集計をそのまま dump）、Y は整形＋丸め＋決定的ソートという傾向差はあるが、いずれも一般的な実装スタイルの範囲でモデル特定の根拠にはならない。"
+  }
+]
