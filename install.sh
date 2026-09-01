@@ -5,13 +5,16 @@
 #   ./install.sh <skill-name> [--force]
 #
 #   <skill-name>   このリポジトリ直下のスキルディレクトリ名（例: model-policy / handoff）。
-#   --force        導入先に同名スキルが既にある場合、退避（.bak-<日時>）してから上書きする。
+#   --force        導入先に同名スキルが既にある場合、退避（~/.claude/backups/ 配下）してから上書きする。
 #
 # 挙動:
 #   1. <repo>/<skill-name>/ が無ければ、利用可能スキル一覧を出して exit 1。
 #   2. ~/.claude/skills/<skill-name> が既にあり --force 無し → 案内して exit 1。
-#      --force あり → <skill-name>.bak-<日時> へ退避してからコピー。
-#   3. コピー後: scripts/*.sh に chmod +x、コピー先ドキュメント（*.md）内の
+#      --force あり → ~/.claude/backups/<skill-name>.bak-<日時> へ退避してからコピー。
+#      （退避先を skills/ の外に置くのは、SKILL.md を含む .bak-* が
+#        重複スキルとして登録されるのを防ぐため。）
+#   3. コピー後: スキル直下の experiments/（実験物）を配備先から除去、
+#      scripts/*.sh に chmod +x、コピー先ドキュメント（*.md）内の
 #      プレースホルダ /Users/<YOU> を実際の $HOME に sed 置換。
 #   4. 次の手動ステップ（settings.json 配線ほか）を表示。
 #
@@ -26,6 +29,8 @@ if [ -z "$REPO_DIR" ]; then
 fi
 
 SKILLS_DEST="$HOME/.claude/skills"
+# 退避先は skills/ の外（skills/ 直下に .bak-* を置くと重複スキルとして登録されるため）
+BACKUPS_DEST="$HOME/.claude/backups"
 
 # --- 利用可能スキル（直下で SKILL.md を持つディレクトリ）を列挙 ------------------
 list_available() {
@@ -98,11 +103,15 @@ DEST="$SKILLS_DEST/$SKILL"
 if [ -e "$DEST" ]; then
   if [ "$FORCE" -ne 1 ]; then
     echo "既存あり: $DEST" >&2
-    echo "--force を付けると上書きします（上書き前に ${SKILL}.bak-<日時> へ退避します）。" >&2
+    echo "--force を付けると上書きします（上書き前に $BACKUPS_DEST/${SKILL}.bak-<日時> へ退避します）。" >&2
     echo "例: ./install.sh $SKILL --force" >&2
     exit 1
   fi
-  BAK="$DEST.bak-$(date +%Y%m%d-%H%M%S)"
+  if ! mkdir -p "$BACKUPS_DEST"; then
+    echo "エラー: 退避先ディレクトリを作成できませんでした: $BACKUPS_DEST" >&2
+    exit 1
+  fi
+  BAK="$BACKUPS_DEST/$SKILL.bak-$(date +%Y%m%d-%H%M%S)"
   if ! mv "$DEST" "$BAK"; then
     echo "エラー: 既存スキルの退避に失敗しました: $DEST -> $BAK" >&2
     exit 1
@@ -120,6 +129,15 @@ if ! cp -R "$SRC" "$DEST"; then
   exit 1
 fi
 echo "コピーしました: $SRC -> $DEST"
+
+# --- 実験物（スキル直下の experiments/）は配備対象外 ----------------------------
+if [ -d "$DEST/experiments" ]; then
+  if ! rm -rf "$DEST/experiments"; then
+    echo "エラー: experiments/ の除去に失敗しました: $DEST/experiments" >&2
+    exit 1
+  fi
+  echo "配備対象外のため除去しました: $DEST/experiments"
+fi
 
 # --- scripts/*.sh に実行権限を付与 ----------------------------------------------
 if [ -d "$DEST/scripts" ]; then
