@@ -87,10 +87,33 @@ def run_turn(thread_id: str, prompt: str, opts: dict) -> None:
         "threadId": thread_id,
         "item": {"id": f"message-{thread_id}", "type": "agentMessage", "text": text},
     }})
-    usage = {"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
-             "output_tokens": 5, "reasoning_output_tokens": 0}
-    emit({"jsonrpc": "2.0", "method": "turn/completed", "params": {
-        "threadId": thread_id, "turn": {"usage": usage},
+    if opts.get("legacy_usage"):
+        usage = {"input_tokens": 10, "cached_input_tokens": 0, "cache_write_input_tokens": 0,
+                 "output_tokens": 5, "reasoning_output_tokens": 0}
+        emit({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+            "threadId": thread_id, "turn": {"usage": usage},
+        }})
+    else:
+        usage = {"totalTokens": 15, "inputTokens": 10, "cachedInputTokens": 0,
+                 "cacheWriteInputTokens": 0, "outputTokens": 5, "reasoningOutputTokens": 0}
+        emit({"jsonrpc": "2.0", "method": "thread/tokenUsage/updated", "params": {
+            "threadId": thread_id, "turnId": f"turn-{TURN_COUNT}",
+            "tokenUsage": {"total": usage, "last": usage, "modelContextWindow": 258400},
+        }})
+        emit({"jsonrpc": "2.0", "method": "turn/completed", "params": {
+            "threadId": thread_id,
+            "turn": {"id": f"turn-{TURN_COUNT}", "status": "completed", "items": []},
+        }})
+    time.sleep(float(opts.get("rate_limits_delay", 0)))
+    emit({"jsonrpc": "2.0", "method": "account/rateLimits/updated", "params": {
+        "rateLimits": {
+            "limitId": "codex", "limitName": None,
+            "primary": {"usedPercent": 12.5, "windowDurationMins": 10080,
+                        "resetsAt": 1788835715},
+            "secondary": None,
+            "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+            "planType": "pro", "rateLimitReachedType": None, "spendControlReached": None,
+        },
     }})
 
 

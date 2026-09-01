@@ -736,6 +736,9 @@ def base_payload(args, cd: str, started, ended, status: str, queued_sec: float =
         "queued_sec": round(max(0.0, queued_sec), 3),   # スロット待ち（duration には含めない）
         "duration_sec": round((ended - started).total_seconds(), 3),
         "usage": None,
+        "usage_source": None,
+        "usage_partial": False,
+        "rate_limits": None,
         "credits_est": None,
         "touched_files": [],
         "commands": [],
@@ -770,6 +773,8 @@ def append_ledger(args, cd: str, payload: dict) -> None:
             "resume_of": args.resume or (payload.get("thread_id") if args.resume_last else None),
             "mock": payload.get("mock"),
             "usage": payload["usage"],
+            "usage_source": payload.get("usage_source"),
+            "usage_partial": bool(payload.get("usage_partial")),
             "credits_est": payload.get("credits_est"),
             "status": payload.get("status"),
         })
@@ -808,6 +813,7 @@ def install_signal_handlers(ctx: dict) -> None:
         if col is not None:
             p["thread_id"] = col.thread_id
             p["usage"] = col.usage
+            p["usage_source"] = "turn.completed" if col.usage else None
             p["credits_est"] = lib.credits_est(col.usage, args.model) if col.usage else None
             p["touched_files"] = col.touched
             p["commands"] = col.commands
@@ -817,6 +823,10 @@ def install_signal_handlers(ctx: dict) -> None:
             p["warnings"] = list(ctx.get("warnings") or [])
         p["errors"] = (p.get("errors") or []) + [
             f"{name} を受けたため停止した（子プロセスグループも終了させた）"]
+        try:
+            append_ledger(args, ctx.get("cd") or "", p)
+        except Exception:
+            pass
         try:
             write_job(Path(job_dir), p)
         except OSError:
@@ -1150,11 +1160,21 @@ def main(argv=None) -> int:
     payload["exit_code"] = exit_code
     payload["thread_id"] = col.thread_id
     payload["usage"] = col.usage
-    payload["credits_est"] = lib.credits_est(col.usage, args.model) if col.usage else None
+    payload["usage_source"] = "turn.completed" if col.usage else None
+    if not args.mock:
+        rollout = lib.scan_rollout(col.thread_id)
+        if payload["usage"] is None and rollout["usage"]:
+            payload["usage"] = rollout["usage"]
+            payload["usage_source"] = "rollout.token_count"
+            payload["usage_partial"] = True
+            payload["warnings"].append(
+                "turn.completed を受信していないため、rollout の token_count から部分 usage を復元した（下限見積り）")
+        payload["rate_limits"] = rollout["rate_limits"]
+    payload["credits_est"] = lib.credits_est(payload["usage"], args.model) if payload["usage"] else None
     payload["touched_files"] = col.touched
     payload["commands"] = col.commands
     payload["errors"] = col.errors
-    payload["warnings"] = warnings + col.warnings
+    payload["warnings"] = payload["warnings"] + warnings + col.warnings
     payload["job_dir"] = str(job_dir)
     if args.mode == "imagegen":
         payload["image"] = output_image_payload(args.out_path, payload["warnings"])
@@ -1184,6 +1204,7 @@ def main(argv=None) -> int:
             payload["warnings"].append("--schema を指定したが last.md が空のため structured_output は null")
 
     append_ledger(args, cd, payload)
+    lib.append_rate_limits(payload)
     write_job(job_dir, payload)
 
     print(f"status={status} exit_code={exit_code} events={col.event_count} "

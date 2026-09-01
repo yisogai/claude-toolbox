@@ -183,6 +183,16 @@ class TestScenarios(Base):
         self.assertIsNone(job["usage"])
         self.assertEqual(self.ledger(), [])   # usage が無ければ台帳に載せない
 
+    def test_t14_mock_failed_keeps_usage_none_and_ledger_empty(self):
+        proc, job_dir = self.run_job("failed", name="t14-failed")
+        self.assertEqual(proc.returncode, 2, proc.stderr)
+        job = self.load(job_dir)
+        self.assertIsNone(job["usage"])
+        self.assertIsNone(job["usage_source"])
+        self.assertFalse(job["usage_partial"])
+        self.assertIsNone(job["rate_limits"])
+        self.assertEqual(self.ledger(), [])
+
     def test_idle_timeout_kills_process_group(self):
         t0 = time.monotonic()
         proc, job_dir = self.run_job(
@@ -571,6 +581,50 @@ class TestJobCli(Base):
 
 
 class TestArgvAndLib(Base):
+    def test_t01_normalize_usage_accepts_camel_case(self):
+        usage = lib.normalize_usage({"inputTokens": 10, "outputTokens": 5})
+        self.assertEqual(set(usage), set(lib.USAGE_FIELDS))
+        self.assertEqual(usage["input_tokens"], 10)
+        self.assertEqual(usage["output_tokens"], 5)
+
+    def test_t02_normalize_usage_prefers_snake_case(self):
+        usage = lib.normalize_usage({"inputTokens": 10, "input_tokens": 20})
+        self.assertEqual(usage["input_tokens"], 20)
+
+    def test_t03_normalize_rate_limits_accepts_real_camel_and_snake_shapes(self):
+        camel = {
+            "limitId": "codex", "limitName": None,
+            "primary": {"usedPercent": 0, "windowDurationMins": 10080,
+                        "resetsAt": 1788835715},
+            "secondary": None,
+            "credits": {"hasCredits": False, "unlimited": False, "balance": "0"},
+            "individualLimit": None, "spendControlReached": None, "planType": "pro",
+            "rateLimitReachedType": None,
+        }
+        snake = {
+            "limit_id": "codex", "limit_name": None,
+            "primary": {"used_percent": 0.0, "window_minutes": 10080,
+                        "resets_at": 1788835715},
+            "secondary": None,
+            "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+            "individual_limit": None, "spend_control_reached": None, "plan_type": "pro",
+            "rate_limit_reached_type": None,
+        }
+        one = lib.normalize_rate_limits(camel, "fixture")
+        two = lib.normalize_rate_limits(snake, "fixture")
+        one.pop("observed_at")
+        two.pop("observed_at")
+        self.assertEqual(one, two)
+        self.assertEqual(one["primary"]["window_minutes"], 10080)
+        self.assertIsNone(one["secondary"])
+
+    def test_t04_merge_rate_limits_does_not_clear_sparse_fields(self):
+        previous = {"primary": {"used_percent": 1}, "secondary": {"used_percent": 2}}
+        merged = lib.merge_rate_limits(previous, {
+            "primary": {"used_percent": 3}, "secondary": None})
+        self.assertEqual(merged["primary"]["used_percent"], 3)
+        self.assertEqual(merged["secondary"], {"used_percent": 2})
+
     def test_build_argv_order(self):
         import codex_run
         args = codex_run.build_parser().parse_args(
@@ -619,6 +673,83 @@ class TestArgvAndLib(Base):
         self.assertEqual(set(u), set(lib.USAGE_FIELDS))
         self.assertEqual(u["input_tokens"], 5)
         self.assertEqual(u["output_tokens"], 0)
+
+    def _rollout_path(self, thread_id):
+        path = self.codex_home / "sessions/2026/09/01" / f"rollout-2026-09-01T11-57-03-{thread_id}.jsonl"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        return path
+
+    def test_t11_scan_rollout_returns_usage_and_rate_limits(self):
+        thread_id = "01a05ae2-7e9b-0000-0000-000000000001"
+        row = {"timestamp": "2026-09-01T02:56:47.688Z", "ordinal": 12,
+               "type": "event_msg", "payload": {"type": "token_count", "info": {
+                   "total_token_usage": {"input_tokens": 22176, "cached_input_tokens": 6912,
+                       "cache_write_input_tokens": 0, "output_tokens": 5,
+                       "reasoning_output_tokens": 0, "total_tokens": 22181},
+                   "last_token_usage": {"input_tokens": 22176, "cached_input_tokens": 6912,
+                       "cache_write_input_tokens": 0, "output_tokens": 5,
+                       "reasoning_output_tokens": 0, "total_tokens": 22181},
+                   "model_context_window": 258400}, "rate_limits": {
+                       "limit_id": "codex", "limit_name": None,
+                       "primary": {"used_percent": 0.0, "window_minutes": 10080,
+                                   "resets_at": 1788835715}, "secondary": None,
+                       "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+                       "individual_limit": None, "spend_control_reached": None,
+                       "plan_type": "pro", "rate_limit_reached_type": None}}}
+        self._rollout_path(thread_id).write_text(json.dumps(row) + "\n", encoding="utf-8")
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+        try:
+            result = lib.scan_rollout(thread_id)
+        finally:
+            if old is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old
+        self.assertEqual(set(result["usage"]), set(lib.USAGE_FIELDS))
+        self.assertEqual(result["usage"]["input_tokens"], 22176)
+        self.assertEqual(result["rate_limits"]["primary"]["window_minutes"], 10080)
+
+    def test_t12_scan_rollout_keeps_rate_limits_when_info_is_null(self):
+        thread_id = "01a05ae2-7e9b-0000-0000-000000000002"
+        row = {"timestamp": "2026-09-01T02:57:27.727Z", "ordinal": 12,
+               "type": "event_msg", "payload": {"type": "token_count", "info": None,
+                   "rate_limits": {"limit_id": "codex", "limit_name": None,
+                       "primary": {"used_percent": 0.0, "window_minutes": 10080,
+                                   "resets_at": 1788835715}, "secondary": None,
+                       "credits": {"has_credits": False, "unlimited": False, "balance": "0"},
+                       "individual_limit": None, "spend_control_reached": None,
+                       "plan_type": "pro", "rate_limit_reached_type": None}}}
+        self._rollout_path(thread_id).write_text(json.dumps(row) + "\n", encoding="utf-8")
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+        try:
+            result = lib.scan_rollout(thread_id)
+        finally:
+            if old is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old
+        self.assertIsNone(result["usage"])
+        self.assertEqual(result["rate_limits"]["primary"]["window_minutes"], 10080)
+
+    def test_t13_scan_rollout_handles_missing_empty_and_broken_files(self):
+        old = os.environ.get("CODEX_HOME")
+        os.environ["CODEX_HOME"] = str(self.codex_home)
+        try:
+            missing = lib.scan_rollout("missing")
+            self.assertEqual(missing, {"usage": None, "rate_limits": None, "path": None})
+            for suffix, content in (("empty", ""), ("broken", '{"type":"token_count"')):
+                path = self._rollout_path(suffix)
+                path.write_text(content, encoding="utf-8")
+                result = lib.scan_rollout(suffix)
+                self.assertIsNone(result["usage"])
+                self.assertIsNone(result["rate_limits"])
+        finally:
+            if old is None:
+                os.environ.pop("CODEX_HOME", None)
+            else:
+                os.environ["CODEX_HOME"] = old
 
     def test_atomic_write_leaves_no_tmp(self):
         target = self.tmp / "out" / "x.json"
@@ -815,6 +946,43 @@ class TestSignalHandling(Base):
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         finally:
             os.close(fd)
+
+    def test_t10_signal_handler_appends_available_usage(self):
+        import codex_run
+        from types import SimpleNamespace
+        from unittest import mock
+
+        job_dir = self.tmp / "signal-ledger"
+        args = codex_run.build_parser().parse_args(
+            ["--mode", "task", "--job-dir", str(job_dir), "--prompt", "x"])
+        col = SimpleNamespace(
+            thread_id="th_signal", usage={
+                "input_tokens": 10, "cached_input_tokens": 0,
+                "cache_write_input_tokens": 0, "output_tokens": 5,
+                "reasoning_output_tokens": 0},
+            touched=[], commands=[], errors=[], warnings=[])
+        handlers = {}
+        old_root = os.environ.get("CODEX_BRIDGE_ROOT")
+        os.environ["CODEX_BRIDGE_ROOT"] = str(self.root)
+        try:
+            with mock.patch.object(codex_run.signal, "signal",
+                                   side_effect=lambda sig, fn: handlers.__setitem__(sig, fn)), \
+                 mock.patch.object(codex_run.os, "_exit", side_effect=SystemExit):
+                codex_run.install_signal_handlers({
+                    "args": args, "cd": str(self.cd), "job_dir": job_dir,
+                    "started": lib.now_utc(), "queued_sec": 0, "warnings": [],
+                    "proc": None, "col": col, "slot": None})
+                with self.assertRaises(SystemExit):
+                    handlers[signal.SIGTERM](signal.SIGTERM, None)
+        finally:
+            if old_root is None:
+                os.environ.pop("CODEX_BRIDGE_ROOT", None)
+            else:
+                os.environ["CODEX_BRIDGE_ROOT"] = old_root
+        rows = self.ledger()
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["status"], "killed")
+        self.assertEqual(rows[0]["usage_source"], "turn.completed")
 
 
 class TestJobDirReuse(Base):
@@ -1024,6 +1192,22 @@ class TestUsageResumeAccounting(Base):
         m = json.loads(r.stdout)["by_model"]["gpt-5.6-terra"]
         self.assertEqual(m["input"], 35000)
         self.assertEqual(m["output"], 7000)
+
+    def test_t15_old_and_new_ledger_rows_can_be_mixed(self):
+        old_row, new_row = self.cumulative_rows()
+        new_row["usage_source"] = "rollout.token_count"
+        new_row["usage_partial"] = True
+        self.write_rows([old_row, new_row])
+        result = self.job_cli(["usage", "--json", "--usage-mode", "per_turn"])
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout)["jobs"], 2)
+
+    def test_t16_partial_usage_is_not_resume_delta_baseline(self):
+        partial, resumed = self.cumulative_rows()
+        partial["usage_partial"] = True
+        adjusted = __import__("codex_job").adjust_resumed_rows([partial, resumed])
+        self.assertEqual(adjusted[1]["usage"]["input_tokens"], 25000)
+        self.assertEqual(adjusted[1]["usage"]["output_tokens"], 5000)
 
     def test_run_records_resume_fields_in_ledger(self):
         import codex_run

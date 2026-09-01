@@ -61,6 +61,55 @@ class PoolBase(unittest.TestCase):
 
 
 class TestPool(PoolBase):
+    def test_t05_new_protocol_records_usage_source_and_credits(self):
+        proc, output = self.run_pool(self.jobs("usage"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = self.job(output, "usage")
+        self.assertEqual(set(payload["usage"]), {
+            "input_tokens", "cached_input_tokens", "cache_write_input_tokens",
+            "output_tokens", "reasoning_output_tokens"})
+        self.assertEqual(payload["usage"]["input_tokens"], 10)
+        self.assertEqual(payload["usage_source"], "thread/tokenUsage/updated")
+        self.assertIsNotNone(payload["credits_est"])
+        self.assertEqual(payload["model_context_window"], 258400)
+
+    def test_t06_mock_server_does_not_write_usage_ledger(self):
+        proc, _ = self.run_pool(self.jobs("no-ledger"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        ledger = self.root / "var" / "codex_usage.jsonl"
+        self.assertFalse(ledger.exists())
+
+    def test_t07_legacy_turn_usage_remains_a_fallback(self):
+        proc, output = self.run_pool(
+            self.jobs("legacy"), {"jobs": {"legacy": {"legacy_usage": True}}})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = self.job(output, "legacy")
+        self.assertEqual(payload["usage_source"], "turn/completed")
+        self.assertEqual(payload["usage"]["output_tokens"], 5)
+
+    def test_t08_usage_less_turn_completed_does_not_clear_token_usage(self):
+        proc, output = self.run_pool(self.jobs("keep-usage"))
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        payload = self.job(output, "keep-usage")
+        self.assertEqual(payload["usage_source"], "thread/tokenUsage/updated")
+        self.assertEqual(payload["usage"]["input_tokens"], 10)
+        events = [json.loads(line) for line in
+                  (output / "jobs/keep-usage/events.jsonl").read_text(encoding="utf-8").splitlines()]
+        methods = [event.get("method") for event in events]
+        self.assertLess(methods.index("thread/tokenUsage/updated"), methods.index("turn/completed"))
+
+    def test_t09_rate_limits_are_drained_and_unrouted_notification_is_kept(self):
+        proc, output = self.run_pool(
+            self.jobs("rate-limit"), {"jobs": {"rate-limit": {"rate_limits_delay": 0.2}}})
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        pool = json.loads((output / "pool.json").read_text(encoding="utf-8"))
+        self.assertEqual(pool["rate_limits"]["primary"]["window_minutes"], 10080)
+        self.assertIsNone(pool["rate_limits"]["secondary"])
+        unrouted = [json.loads(line) for line in
+                    (output / "unrouted.jsonl").read_text(encoding="utf-8").splitlines()]
+        rate_events = [row for row in unrouted if row.get("method") == "account/rateLimits/updated"]
+        self.assertEqual(len(rate_events), 1)
+
     def test_interleaved_notifications_are_routed_per_job(self):
         proc, output = self.run_pool(self.jobs("one", "two", "three"), {
             "jobs": {"one": {"delay": 0.12, "message": "one の結果"},

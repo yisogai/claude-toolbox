@@ -43,6 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--timeout-sec", type=float, default=3600.0, help="プール全体の壁時計秒")
     run.add_argument("--job-timeout-sec", type=float, default=1800.0, help="各ジョブの壁時計秒")
     run.add_argument("--idle-timeout-sec", type=float, default=600.0, help="全通知が止まる許容秒")
+    run.add_argument("--drain-ms", type=float, default=1000.0, help="全ジョブ終了後に末尾通知を待つミリ秒")
     run.add_argument("--model", default="gpt-5.6-terra", help="既定モデル")
     run.add_argument("--effort", default="high", help="既定 reasoning effort")
     run.add_argument("--codex-config", action="append", default=[], metavar="KEY=VALUE",
@@ -254,6 +255,8 @@ class JobState:
     thread_id: str | None = None
     status: str = "queued"
     usage: dict | None = None
+    usage_source: str | None = None
+    model_context_window: int | None = None
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
     messages: list[str] = field(default_factory=list)
@@ -275,6 +278,8 @@ class Pool:
         self.started_mono = time.monotonic()
         self.last_activity = self.started_mono
         self.abort_reason: str | None = None
+        self.rate_limits: dict | None = None
+        self.unrouted_count = 0
         self.lock = threading.Lock()
 
     def payload(self, job: JobState, ended=None) -> dict:
@@ -287,7 +292,11 @@ class Pool:
             "model": job.model, "effort": job.effort, "mode": "pool", "write": bool(job.spec.get("write", False)),
             "mock": bool(self.args.mock_server), "cwd": job.spec["cwd"],
             "started_at": lib.iso(started), "ended_at": lib.iso(finished), "duration_sec": round(max(0, duration), 3),
-            "usage": job.usage, "credits_est": lib.credits_est(job.usage, job.model) if job.usage else None,
+            "usage": job.usage, "usage_source": job.usage_source,
+            "usage_partial": bool(job.usage and job.status != "completed"),
+            "model_context_window": job.model_context_window,
+            "credits_est": lib.credits_est(job.usage, job.model) if job.usage else None,
+            "rate_limits": self.rate_limits,
             "touched_files": job.touched, "commands": job.commands,
             "last_message_path": str(last) if last.exists() and last.stat().st_size else None,
             "structured_output": None, "errors": job.errors, "warnings": job.warnings,
@@ -319,6 +328,7 @@ class Pool:
                     "effort": job.effort, "write": payload["write"], "cwd": payload["cwd"],
                     "claude_session_id": os.environ.get("CLAUDE_CODE_SESSION_ID"), "thread_id": job.thread_id,
                     "resumed": False, "resume_of": None, "mock": False, "usage": payload["usage"],
+                    "usage_source": payload["usage_source"], "usage_partial": payload["usage_partial"],
                     "credits_est": payload["credits_est"], "status": payload["status"],
                 })
             except OSError as exc:
@@ -332,15 +342,24 @@ class Pool:
     def on_notification(self, msg: dict) -> None:
         params = msg.get("params") or {}
         thread_id = params.get("threadId") or params.get("thread_id")
+        method = msg.get("method")
         with self.lock:
             self.last_activity = time.monotonic()
             job = self.by_thread.get(thread_id)
             if contains_auth_error(msg):
                 self.abort_reason = "認証エラーを受信したためプール全体を停止した。codex login で再ログインしてください"
+            if method == "account/rateLimits/updated":
+                rate_limits = lib.normalize_rate_limits(
+                    params.get("rateLimits"), "account/rateLimits/updated")
+                self.rate_limits = lib.merge_rate_limits(self.rate_limits, rate_limits)
+            log_unrouted = job is None and self.unrouted_count < 500
+            if log_unrouted:
+                self.unrouted_count += 1
         if job is None:
+            if log_unrouted:
+                lib.append_jsonl(self.pool_dir / "unrouted.jsonl", msg)
             return
         lib.append_jsonl(self._event_path(job), msg)
-        method = msg.get("method")
         if method in ("item/completed", "item/updated", "item/started"):
             item = params.get("item") or {}
             kind = item.get("type")
@@ -354,9 +373,22 @@ class Pool:
                 rec = {"command": item.get("command"), "exit_code": item.get("exitCode", item.get("exit_code")), "status": item.get("status")}
                 if rec not in job.commands:
                     job.commands.append(rec)
+        elif method == "thread/tokenUsage/updated":
+            # 実機検証 2026-09-01（U1）: この通知は turn 完了の直前に1回だけ届き、turn の途中経過としては
+            # 飛ばない（--job-timeout-sec 3 の中断ジョブでは1件も届かず usage は None のままだった）。
+            # したがって pool のジョブ timeout では usage は取得できない。
+            token_usage = params.get("tokenUsage") or {}
+            usage = lib.normalize_usage(token_usage.get("total") or token_usage.get("last"))
+            if usage:
+                job.usage, job.usage_source = usage, "thread/tokenUsage/updated"
+            context_window = token_usage.get("modelContextWindow")
+            if isinstance(context_window, int):
+                job.model_context_window = context_window
         elif method == "turn/completed":
             turn = params.get("turn") or {}
-            job.usage = lib.normalize_usage(turn.get("usage") or params.get("usage"))
+            usage = lib.normalize_usage(turn.get("usage") or params.get("usage"))
+            if usage:
+                job.usage, job.usage_source = usage, "turn/completed"
             for item in turn.get("items") or []:
                 if item.get("type") == "agentMessage" and item.get("text"):
                     job.messages.append(str(item["text"]))
@@ -472,6 +504,10 @@ class Pool:
                 while pending and sum(j.status == "running" for j in self.jobs) < self.args.max_parallel:
                     self.start_job(pending.popleft())
                 time.sleep(POLL_SEC)
+            drain_deadline = time.monotonic() + self.args.drain_ms / 1000.0
+            while (time.monotonic() < drain_deadline and self.rpc.proc.poll() is None
+                   and not self.rpc.eof):
+                time.sleep(min(POLL_SEC, max(0, drain_deadline - time.monotonic())))
             return self.exit_code()
         finally:
             if self.rpc:
@@ -492,18 +528,26 @@ class Pool:
         ended = lib.now_utc()
         statuses = [j.status for j in self.jobs]
         status = "completed" if statuses and all(s == "completed" for s in statuses) else ("timeout" if "timeout" in statuses else "failed")
-        lib.atomic_write_json(self.pool_dir / "pool.json", {
+        payload = {
             "status": status, "started_at": lib.iso(self.started), "ended_at": lib.iso(ended),
             "duration_sec": round((ended - self.started).total_seconds(), 3),
+            "rate_limits": self.rate_limits,
             "jobs": [{"id": j.spec["id"], "status": j.status, "thread_id": j.thread_id,
                       "duration_sec": round(((j.ended or ended) - (j.started or self.started)).total_seconds(), 3)} for j in self.jobs],
+        }
+        lib.append_rate_limits({
+            "ended_at": payload["ended_at"], "job_dir": str(self.pool_dir), "mode": "pool",
+            "model": self.args.model, "status": status, "rate_limits": self.rate_limits,
+            "mock": bool(self.args.mock_server),
         })
+        lib.atomic_write_json(self.pool_dir / "pool.json", payload)
 
 
 def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
-    if not (1 <= args.max_parallel <= MAX_PARALLEL) or args.timeout_sec <= 0 or args.job_timeout_sec <= 0 or args.idle_timeout_sec <= 0:
-        lib.eprint("エラー: max-parallel は 1〜4、各 timeout は正数で指定してください")
+    if (not (1 <= args.max_parallel <= MAX_PARALLEL) or args.timeout_sec <= 0
+            or args.job_timeout_sec <= 0 or args.idle_timeout_sec <= 0 or args.drain_ms < 0):
+        lib.eprint("エラー: max-parallel は 1〜4、各 timeout は正数、drain-ms は 0 以上で指定してください")
         return 1
     try:
         jobs = load_jobs(Path(args.jobs_file).expanduser().resolve())

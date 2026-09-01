@@ -17,6 +17,7 @@ import os
 import stat
 import sys
 import tempfile
+import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -53,6 +54,10 @@ def locks_dir() -> Path:
 
 def usage_ledger_path() -> Path:
     return var_dir() / "codex_usage.jsonl"
+
+
+def rate_limits_ledger_path() -> Path:
+    return var_dir() / "codex_rate_limits.jsonl"
 
 
 def pricing_path() -> Path:
@@ -106,6 +111,44 @@ def codex_home() -> Path:
     if env:
         return Path(env).expanduser()
     return Path.home() / ".codex"
+
+
+ROLLOUT_TAIL_BYTES = 512 * 1024
+
+
+def scan_rollout(thread_id: str | None, budget_sec: float = 1.5) -> dict:
+    """rollout jsonl の最後の token_count を best-effort で取得する。"""
+    out = {"usage": None, "rate_limits": None, "path": None}
+    if not thread_id:
+        return out
+    started = time.monotonic()
+    pattern = f"sessions/*/*/*/rollout-*-{thread_id}.jsonl"
+    for path in sorted(codex_home().glob(pattern)):
+        if time.monotonic() - started > budget_sec:
+            break
+        try:
+            with open(path, "rb") as f:
+                f.seek(0, 2)
+                size = f.tell()
+                f.seek(max(0, size - ROLLOUT_TAIL_BYTES))
+                lines = f.read().split(b"\n")
+        except OSError:
+            continue
+        out["path"] = str(path)
+        for raw in reversed(lines):
+            if b'"token_count"' not in raw:
+                continue
+            try:
+                payload = (json.loads(raw.decode("utf-8", "replace")).get("payload") or {})
+            except (json.JSONDecodeError, UnicodeDecodeError):
+                continue
+            if payload.get("type") != "token_count":
+                continue
+            info = payload.get("info") or {}
+            out["usage"] = normalize_usage(info.get("total_token_usage"))
+            out["rate_limits"] = normalize_rate_limits(payload.get("rate_limits"), "rollout.token_count")
+            return out
+    return out
 
 
 # ---------------------------------------------------------------------------
@@ -240,19 +283,96 @@ USAGE_FIELDS = (
     "reasoning_output_tokens",
 )
 
+USAGE_ALIASES = {
+    "inputTokens": "input_tokens",
+    "cachedInputTokens": "cached_input_tokens",
+    "cacheWriteInputTokens": "cache_write_input_tokens",
+    "outputTokens": "output_tokens",
+    "reasoningOutputTokens": "reasoning_output_tokens",
+}
+
 
 def normalize_usage(usage) -> dict | None:
     """turn.completed の usage を 5 フィールドの int dict に正規化する。"""
     if not isinstance(usage, dict):
         return None
+    src = dict(usage)
+    for camel, snake in USAGE_ALIASES.items():
+        if snake not in src and camel in src:
+            src[snake] = src[camel]
     out = {}
     for k in USAGE_FIELDS:
-        v = usage.get(k)
+        v = src.get(k)
         try:
             out[k] = int(v) if v is not None else 0
         except (TypeError, ValueError):
             out[k] = 0
     return out
+
+
+def _rl_window(window):
+    if not isinstance(window, dict):
+        return None
+    return {
+        "used_percent": window.get("used_percent", window.get("usedPercent")),
+        "window_minutes": window.get("window_minutes", window.get("windowDurationMins")),
+        "resets_at": window.get("resets_at", window.get("resetsAt")),
+    }
+
+
+def normalize_rate_limits(raw, source: str) -> dict | None:
+    """RateLimitSnapshot を snake_case にする。窓種は window_minutes で判別する。
+
+    rate_limits はアカウント単位のスナップショットであり、usage のような差分は取らない。
+    primary / secondary は特定の窓種へ固定して解釈しない。
+    """
+    if not isinstance(raw, dict):
+        return None
+    credits = raw.get("credits")
+    return {
+        "limit_id": raw.get("limit_id", raw.get("limitId")),
+        "limit_name": raw.get("limit_name", raw.get("limitName")),
+        "primary": _rl_window(raw.get("primary")),
+        "secondary": _rl_window(raw.get("secondary")),
+        "credits": {
+            "has_credits": credits.get("has_credits", credits.get("hasCredits")),
+            "unlimited": credits.get("unlimited"),
+            "balance": credits.get("balance"),
+        } if isinstance(credits, dict) else None,
+        "plan_type": raw.get("plan_type", raw.get("planType")),
+        "rate_limit_reached_type": raw.get("rate_limit_reached_type", raw.get("rateLimitReachedType")),
+        "spend_control_reached": raw.get("spend_control_reached", raw.get("spendControlReached")),
+        "source": source,
+        "observed_at": iso(now_utc()),
+    }
+
+
+def merge_rate_limits(prev, new):
+    """疎な更新に含まれる None では、直前のスナップショットを消さない。"""
+    if prev is None:
+        return new
+    if new is None:
+        return prev
+    out = dict(prev)
+    for key, value in new.items():
+        if value is not None:
+            out[key] = value
+    return out
+
+
+def append_rate_limits(payload: dict) -> None:
+    """rate_limits スナップショットを専用台帳へ追記する。"""
+    rate_limits = payload.get("rate_limits")
+    if not rate_limits or payload.get("mock"):
+        return
+    try:
+        append_jsonl(rate_limits_ledger_path(), {
+            "ts": payload["ended_at"], "job_dir": payload.get("job_dir"),
+            "mode": payload.get("mode"), "model": payload.get("model"),
+            "status": payload.get("status"), "rate_limits": rate_limits,
+        })
+    except OSError as exc:
+        payload.setdefault("warnings", []).append(f"rate_limits 台帳への追記に失敗した: {exc}")
 
 
 def credits_est(usage, model: str, pricing=None):

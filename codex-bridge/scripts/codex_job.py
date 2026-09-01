@@ -279,7 +279,8 @@ def adjust_resumed_rows(rows: list) -> list:
                 if credits is not None:
                     new["credits_est"] = credits
                 out[i] = new
-            prev = u        # 累計前提なので基準は「補正前の値」
+            if not r.get("usage_partial"):
+                prev = u    # 累計前提なので基準は「補正前の値」
     return out
 
 
