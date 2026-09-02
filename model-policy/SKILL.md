@@ -7,7 +7,7 @@ description: サブエージェントのモデル使用ポリシー（fable禁�
 
 ## これは何か（仕組みの要約）
 
-メインループを Fable 5（高単価。統括に加えて実質作業も行う）で回しつつ、**サブエージェントが誤って fable で起動すること**をハーネスレベルで防ぐ 4 層システム。ハード強制は「fable 禁止・fork 禁止・model 未指定→opus 書き換え」の 3 点に絞り、opus/sonnet/haiku など fable 以外は素通しする。作業を opus/sonnet に振り分けて委譲する使い分け方針そのものは行動規範層（CLAUDE.md）で担保する。
+メインループを Fable（高単価。統括に加えて実質作業も行う）で回しつつ、**サブエージェントが誤って fable で起動すること**をハーネスレベルで防ぐ 4 層システム。ハード強制は「fable 禁止・fork 禁止・model 未指定→opus 書き換え」の 3 点に絞り、opus/sonnet/haiku など fable 以外は素通しする。作業を opus/sonnet に振り分けて委譲する使い分け方針そのものは行動規範層（CLAUDE.md）で担保する。
 
 | 層 | 実体 | 何をするか | 強制 or 規範 |
 |---|---|---|---|
@@ -49,10 +49,7 @@ bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune set
 bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune init             # 既定で tuning.json を生成
 bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" tune reset            # 削除して内蔵既定へ
 
-# fable 例外の TTL 操作（advisor 廃止済み・現在未使用。通常は使わない。README §7-4）
-bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" exempt 14       # 任意の期限を設定（従量化リスク時）
-bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" exempt clear    # TTL 解除（無期限へ戻す）
-bash "/Users/<YOU>/.claude/skills/model-policy/scripts/model_policy.sh" exempt disable  # 例外を完全停止
+# fable 例外の TTL 操作（exempt サブコマンド）は README §7-4 を参照する。
 ```
 
 運用ルール:
@@ -106,7 +103,7 @@ hook スクリプト自体はハーネスが直接実行するため permissions
 
 ## 既知の限界
 
-- ~~**fable 例外（`fable_exempt_subagent_types`）は subagent_type の自己申告に依存**する~~ → **advisor 廃止に伴い現在は非該当**（例外リストが空のため、名乗っても fable は deny される）。例外を再び使う場合のみ、この自己申告依存のリスクが復活する（README §7-4）。
+- **fable 例外リストは空**で、subagent_type を何と名乗っても fable は deny される。例外を有効にした場合に限り、`fable_exempt_subagent_types` が subagent_type の自己申告に依存するというリスクが生じる（README §7-4）。
 - **Workflow の一部 agent() だけ model 未指定**のケースは検出できない。層1b は「script 全体に `model` の語が一度でもあるか」しか見ない（agent() 個別の部分パースは誤検知源になるため行わない）。この取りこぼしは層2（CLAUDE.md 規律: 全 agent() に `model:'opus'` を明示）で補完する。
 - キー名/ツール名は Claude Code のバージョンで変わりうる。壊れると「エラー」ではなく「**黙って強制が効かなくなる**」方向に倒れる（フェイルオープン設計の裏面）。ハートビート＋カナリアテストで検知する（README §互換性リスク）。
 - `model` / `subagent_type` の抽出キーは 2026-07-07 に v2.1.202 で実測確認して固定済み（`tool_input.model` / `tool_input.subagent_type`、未指定時はキー自体が無い）。バージョンアップで変わったら README の手順で再確認する。

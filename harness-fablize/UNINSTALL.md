@@ -80,16 +80,16 @@ cp "$HOME/.claude/backup-opus-fable-harness-<timestamp>/CLAUDE.md" "$HOME/.claud
 
 ```bash
 rm -f "$HOME/.claude/agents/verifier.md" "$HOME/.claude/agents/implementer.md"
-rm -f "$HOME/.claude/agents/fable-advisor.md"
+rm -f "$HOME/.claude/agents/fable-advisor.md"  # 旧版で配備された場合のみ（現在は配備しない）
 rm -f "$HOME/.claude/workflows/implement-verified.js" "$HOME/.claude/workflows/deep-review.js"
 # workflows/ ディレクトリが空になり、他の workflow を置いていないなら削除してもよい
 rmdir "$HOME/.claude/workflows" 2>/dev/null || true
 ```
 
-fable-advisor.md を削除する場合は、model-policy スキル側の例外登録
-（`~/.claude/model-policy/policy.json` の `fable_exempt_subagent_types`）からも
-`"fable-advisor"` を外すこと（残っていても実害はないが、存在しない agent への
-例外が残るのは紛らわしい）。
+fable-advisor は 2026-07-31 に廃止し、2026-09-02 に本体と配備エントリを削除した。
+旧版から引き継いだ `~/.claude/agents/fable-advisor.md` が残っている場合のみ上の行で削除し、
+併せて model-policy スキル側の例外登録（`~/.claude/model-policy/policy.json` の
+`fable_exempt_subagent_types`）からも `"fable-advisor"` を外す。
 
 他の verifier.md / implementer.md / 同名 workflow をこのハーネス以外の用途で
 使っていないか確認してから削除すること（同名で別内容のファイルを上書きしていた

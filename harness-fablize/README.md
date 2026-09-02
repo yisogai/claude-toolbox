@@ -34,7 +34,7 @@ Opus を素のまま使うと、Fable と比べて次の3点で体感差が出�
 | 完了ゲート hook | `hooks/completion_gate_stop.sh`（Stop）。コード編集後にテスト実行の記録が無いまま完了しようとした場合にだけブロックする | ③ |
 | nudge hook | `hooks/workflow_nudge_prompt.sh`（UserPromptSubmit）。実装系プロンプトにだけワークフロー利用を1行だけ注入 | ② |
 | verifier / implementer agent | `agents/verifier.md`（反証指向レビュー・opus）、`agents/implementer.md`（仕様確定済み実装・sonnet） | ② |
-| fable-advisor agent | `agents/fable-advisor.md`（判断の要所だけ Fable 5 に相談する読み取り専用の判断オラクル・model: fable。稼働モデルの自己申告付き） | ①③ |
+| ~~fable-advisor agent~~ | **廃止済み（2026-07-31）**。ファイル・配備エントリとも削除（2026-09-02） | — |
 | workflows | `workflows/implement-verified.js`（仕様化→実装→反証検証→修正ループ）、`workflows/deep-review.js`（多視点並列レビュー→敵対的検証→統合） | ② |
 | カナリアテスト | `tests/canary.sh`（hooks の単体テスト。実モデル呼び出しなし、実 `~/.claude` にも触れない） | — |
 | 配備・撤去 | `install.sh`（`--dry-run` 既定 / `--apply` / `--switch-model`）、`UNINSTALL.md` | — |
@@ -55,7 +55,7 @@ harness-fablize/install.sh --apply
 
 `install.sh` が行うのは次の4点のみ。
 
-1. `~/.claude/agents/{verifier,implementer,fable-advisor}.md` をコピー。
+1. `~/.claude/agents/{verifier,implementer}.md` をコピー。
 2. `~/.claude/workflows/{implement-verified,deep-review}.js` をコピー。
 3. `~/.claude/settings.json` の `hooks` に4エントリ（PostToolUse×2 / Stop / UserPromptSubmit）を
    差分マージ（冪等。command はこのリポジトリ内の `hooks/*.sh` への絶対パス参照）。
@@ -95,9 +95,4 @@ Opus が SVG/HTML の図を生成した際、レンダリング結果を見ず�
 - hooks は **`~/.claude/settings.json` への配線が無いと発火しない**。`install.sh` で
   自動配線されるが、手動で導入する場合は配線を忘れないこと。
 - hooks はフェイルオープン設計（`jq` 不在等では常に素通り）。強制力の恒久保証はない。
-- **fable-advisor は Fable 5 へのアクセスが前提**（プランに含まれない場合は従量課金になりうる。
-  不要なら `~/.claude/agents/fable-advisor.md` を削除してよい — install.sh の他の配備物とは独立）。
-  claude-toolbox の `model-policy/` スキルを併用している場合、fable サブエージェントは既定で
-  deny されるため、`fable_exempt_subagent_types` への登録が必要（model-policy README §7-4 参照。
-  登録すれば既定で無期限に有効。従量課金環境では `exempt <日数>` の任意 TTL で時限運用にできる）。
-  登録が無ければ advisor は deny される（安全側）。
+- **fable-advisor は廃止済み（2026-07-31）**。2026-09-02 に本体と配備エントリを削除したため、install.sh を再実行しても復活しない。fable サブエージェントは model-policy の例外リストが空である限り常に deny される（model-policy README §7-4）。
